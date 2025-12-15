@@ -1,0 +1,128 @@
+{
+    "taskInfo": {
+      "id": "7",
+      "name": "北极星",
+      "status": "stopped",
+      "baseUrl": "https://news.bjx.com.cn/yw/",
+      "updatedAt": null,
+      "concurrency": 1,
+      "description": "要闻",
+      "crawlStartAt": null,
+      "crawledCount": 0,
+      "requestInterval": 3
+    },
+    "workflowSteps": [
+      {
+        "id": 1761714896973,
+        "type": "request",
+        "config": {
+          "url": "https://news.bjx.com.cn/yw/",
+          "method": "GET",
+          "params": [],
+          "headers": [],
+          "headersJson": "{\n    \"User-Agent\": \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0\"\n}",
+          "headersMode": "json",
+          "nextRequestUrl": "",
+          "extractionRules": [],
+          "nextRequestMode": "standard",
+          "headersJsonError": "",
+          "nextRequestMethod": "GET",
+          "nextRequestParams": [],
+          "nextRequestHeaders": [],
+          "customCodeCollapsed": [],
+          "linkExtractionRules": [],
+          "nextRequestCustomCode": "",
+          "nextRequestParamsJson": "",
+          "nextRequestParamsMode": "keyvalue",
+          "nextRequestDeduplicate": true,
+          "nextRequestHeadersJson": "",
+          "nextRequestHeadersMode": "keyvalue",
+          "nextRequestCustomCodeError": "",
+          "nextRequestParamsJsonError": "",
+          "nextRequestHeadersJsonError": ""
+        },
+        "testing": false,
+        "timeout": 30,
+        "condition": "always",
+        "retryCount": 0,
+        "retryDelay": 1,
+        "customCondition": ""
+      },
+      {
+        "id": 1761714904296,
+        "type": "link_extraction",
+        "config": {
+          "customCodeCollapsed": "",
+          "linkExtractionRules": [
+            {
+              "trim": true,
+              "dataType": "text",
+              "maxLinks": 10,
+              "multiple": false,
+              "required": false,
+              "fieldName": "link",
+              "expression": "/html/body/div[5]/div/div[1]/div[2]/ul/li/a/@href",
+              "linkFilter": "",
+              "deduplicate": true,
+              "extractType": "xpath",
+              "postProcess": "",
+              "defaultValue": "",
+              "linkSelector": ""
+            },
+            {
+              "trim": true,
+              "dataType": "text",
+              "maxLinks": 10,
+              "multiple": false,
+              "required": false,
+              "fieldName": "title",
+              "expression": "/html/body/div[5]/div/div[1]/div[2]/ul/li/a/@title",
+              "linkFilter": "",
+              "deduplicate": true,
+              "extractType": "xpath",
+              "postProcess": "",
+              "defaultValue": "",
+              "linkSelector": ""
+            }
+          ],
+          "nextRequestCustomCode": "",
+          "nextRequestCustomCodeError": ""
+        },
+        "testing": false,
+        "timeout": 30,
+        "condition": "always",
+        "retryCount": 0,
+        "retryDelay": 1,
+        "customCondition": ""
+      },
+      {
+        "id": 1761716321584,
+        "type": "data_extraction",
+        "config": {
+          "extractionRules": [
+            {
+              "trim": true,
+              "dataType": "text",
+              "multiple": false,
+              "required": false,
+              "fieldName": "content",
+              "expression": "//*[@id=\"article_cont\"]",
+              "extractType": "xpath",
+              "postProcess": "",
+              "defaultValue": ""
+            }
+          ],
+          "customCodeCollapsed": [],
+          "nextRequestCustomCode": "",
+          "nextRequestCustomCodeError": ""
+        },
+        "testing": false,
+        "timeout": 30,
+        "condition": "always",
+        "retryCount": 0,
+        "retryDelay": 1,
+        "customCondition": ""
+      }
+    ]
+  }
+  
