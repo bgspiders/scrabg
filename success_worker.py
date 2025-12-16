@@ -12,15 +12,18 @@ from parsel import Selector
 from redis import Redis
 
 from crawler.utils.config_loader import load_config
+from crawler.utils.db_manager import DatabaseManager
 from crawler.utils.env_loader import load_env_file
+from crawler.utils.redis_manager import RedisManager
 
 load_env_file()
 
 
 class WorkflowProcessor:
-    def __init__(self, config: Dict[str, Any], redis_cli: Redis):
+    def __init__(self, config: Dict[str, Any], redis_manager: RedisManager, db_manager: Optional[DatabaseManager] = None):
         self.config = config
-        self.redis_cli = redis_cli
+        self.redis_manager = redis_manager
+        self.db_manager = db_manager
         self.steps = config.get("workflowSteps", [])
         self.task_info = config.get("taskInfo", {})
         self.start_key = os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
@@ -32,7 +35,7 @@ class WorkflowProcessor:
     def run_forever(self, sleep_seconds: float = 1.0):
         print(f"[worker] Listening on redis list {self.success_key}")
         while True:
-            result = self.redis_cli.brpop(self.success_key, timeout=5)
+            result = self.redis_manager.brpop([self.success_key], timeout=5)
             if not result:
                 time.sleep(sleep_seconds)
                 continue
@@ -42,7 +45,7 @@ class WorkflowProcessor:
                 self.process_record(record)
             except Exception as exc:
                 print(f"[worker] 处理失败: {exc}")
-                self.redis_cli.lpush(
+                self.redis_manager.lpush(
                     self.error_key,
                     json.dumps({"error": str(exc), "payload": data.decode("utf-8")}, ensure_ascii=False),
                 )
@@ -119,7 +122,7 @@ class WorkflowProcessor:
                 },
                 "dont_filter": False,
             }
-            self.redis_cli.lpush(self.start_key, json.dumps(payload, ensure_ascii=False))
+            self.redis_manager.lpush(self.start_key, json.dumps(payload, ensure_ascii=False))
             print(f"[worker] 推送下级请求 -> {absolute_url}")
 
     def _handle_data_extraction(self, step: Dict[str, Any], response: Dict[str, Any], index: int):
@@ -138,13 +141,28 @@ class WorkflowProcessor:
             "context": response["context"],
             "data": data,
         }
-        self.redis_cli.lpush(self.data_key, json.dumps(item, ensure_ascii=False))
-        print(f"[worker] 数据已写入 {self.data_key}: {response['url']}")
-
+        
+        # Check if this is the last workflow step
+        is_last_step = (index == len(self.steps) - 1)
         custom_code = step.get("config", {}).get("nextRequestCustomCode")
+        has_next_request = bool(custom_code)
+        
+        if is_last_step and not has_next_request:
+            # Save to database if it's the last step and no custom code to generate next requests
+            if self.db_manager and self.db_manager.engine:
+                self._save_to_database(item)
+            else:
+                # Fallback to Redis if database is not configured
+                self.redis_manager.lpush(self.data_key, json.dumps(item, ensure_ascii=False))
+                print(f"[worker] 数据已写入 Redis {self.data_key}: {response['url']}")
+        else:
+            # Not the last step or has custom code, save to Redis
+            self.redis_manager.lpush(self.data_key, json.dumps(item, ensure_ascii=False))
+            print(f"[worker] 数据已写入 Redis {self.data_key}: {response['url']}")
+
         if custom_code:
             for req in self._run_custom_code(custom_code, response, index + 1, data):
-                self.redis_cli.lpush(self.start_key, json.dumps(req, ensure_ascii=False))
+                self.redis_manager.lpush(self.start_key, json.dumps(req, ensure_ascii=False))
                 print(f"[worker] 自定义代码推送请求 -> {req['url']}")
 
     def _extract(self, selector: Selector, rule: Dict[str, Any], multiple: bool) -> Any:
@@ -173,6 +191,37 @@ class WorkflowProcessor:
                     except json.JSONDecodeError:
                         return {}
         return {}
+
+    def _save_to_database(self, item: Dict[str, Any]):
+        """Save extracted data to MySQL database"""
+        try:
+            data = item.get("data", {})
+            context = item.get("context", {})
+            source_url = item.get("source_url", "")
+            
+            # Merge context and data for extra field
+            extra = {**context}
+            
+            # link defaults to source_url if not provided
+            link = context.get("link") or source_url
+            
+            # Use DatabaseManager to save article
+            self.db_manager.save_article(
+                task_id=item.get("task_id"),
+                title=data.get("title") or context.get("title") or "",
+                link=link,
+                content=data.get("content") or "",
+                source_url=source_url,
+                extra=extra,
+            )
+            print(f"[worker] ✓ 数据已保存到数据库: {source_url}")
+        except Exception as e:
+            print(f"[worker] ✗ 保存到数据库失败: {e}")
+            # Fallback: save to Redis error queue
+            self.redis_manager.lpush(
+                self.error_key,
+                json.dumps({"error": f"Database save failed: {str(e)}", "item": item}, ensure_ascii=False),
+            )
 
     def _run_custom_code(
         self,
@@ -217,24 +266,41 @@ class WorkflowProcessor:
 
 def main():
     config_path = os.getenv("CONFIG_PATH", "demo.json")
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     config = load_config(config_path)
     
+    # Create Redis manager
+    redis_manager = None
     try:
-        redis_cli = Redis.from_url(redis_url, decode_responses=False)
-        redis_cli.ping()
-        print(f"[success_worker] Redis 连接成功")
+        redis_manager = RedisManager.from_env(decode_responses=False)
+        if redis_manager.test_connection():
+            print(f"[success_worker] ✓ Redis 连接成功: {redis_manager.get_masked_url()}")
+        else:
+            raise RuntimeError("Redis connection test failed")
     except Exception as e:
         error_msg = str(e)
         if "Authentication required" in error_msg or "NOAUTH" in error_msg:
-            print(f"[success_worker] ❌ Redis 认证失败！")
+            print(f"[success_worker] ✗ Redis 认证失败！")
             print(f"[success_worker] 请检查 .env 文件中的 REDIS_URL 配置")
             print(f"[success_worker] 格式: redis://:password@host:port/db")
         else:
-            print(f"[success_worker] ❌ Redis 连接失败: {error_msg}")
+            print(f"[success_worker] ✗ Redis 连接失败: {error_msg}")
         raise
+    
+    # Create database manager (optional)
+    db_manager = None
+    try:
+        db_manager = DatabaseManager.from_env()
+        if db_manager.engine and db_manager.test_connection():
+            print(f"[success_worker] ✓ MySQL 连接成功: {db_manager.host}:{db_manager.port}/{db_manager.database}")
+        else:
+            print(f"[success_worker] ⚠️  MySQL 配置不完整，将使用 Redis 队列存储数据")
+            db_manager = None
+    except Exception as e:
+        print(f"[success_worker] ⚠️  MySQL 连接失败: {e}")
+        print(f"[success_worker] 将使用 Redis 队列存储数据")
+        db_manager = None
 
-    processor = WorkflowProcessor(config, redis_cli)
+    processor = WorkflowProcessor(config, redis_manager, db_manager)
     processor.run_forever()
 
 

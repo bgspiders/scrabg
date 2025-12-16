@@ -20,30 +20,32 @@ from crawler.utils.env_loader import load_env_file
 load_env_file()
 
 from redis import Redis
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from crawler.utils.db_manager import DatabaseManager
+from crawler.utils.redis_manager import RedisManager
 
 
-def get_mysql_engine():
-    user = os.getenv("MYSQL_USER")
-    password = os.getenv("MYSQL_PASSWORD")
-    host = os.getenv("MYSQL_HOST", "localhost")
-    port = os.getenv("MYSQL_PORT", "3306")
-    db = os.getenv("MYSQL_DB")
-    charset = os.getenv("MYSQL_CHARSET", "utf8mb4")
-    if not all([user, password, db]):
+def get_mysql_manager() -> DatabaseManager:
+    """获取数据库管理器"""
+    db_manager = DatabaseManager.from_env()
+    if not db_manager.engine:
         raise RuntimeError("请设置 MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB")
-    return create_engine(f"mysql+pymysql://{user}:{password}@{host}:{port}/{db}?charset={charset}")
+    return db_manager
 
 
-def get_redis_client():
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    return Redis.from_url(redis_url)
+def get_redis_manager() -> RedisManager:
+    """获取 Redis 管理器"""
+    redis_manager = RedisManager.from_env(decode_responses=False)
+    if not redis_manager.test_connection():
+        raise RuntimeError("Redis 连接失败")
+    return redis_manager
 
 
-def fetch_pending_requests(engine) -> Iterable[Dict[str, Any]]:
+def fetch_pending_requests(db_manager: DatabaseManager) -> Iterable[Dict[str, Any]]:
+    """从数据库获取待处理请求"""
     sql = text("SELECT id, url, method, headers_json, params_json, meta_json FROM pending_requests")
-    with engine.connect() as conn:
-        rows = conn.execute(sql).mappings().all()
+    result = db_manager.execute_query(sql)
+    rows = result.mappings().all()
     for row in rows:
         yield {
             "id": row["id"],
@@ -55,7 +57,8 @@ def fetch_pending_requests(engine) -> Iterable[Dict[str, Any]]:
         }
 
 
-def push_to_redis(redis_cli: Redis, key: str, reqs: Iterable[Dict[str, Any]]):
+def push_to_redis(redis_manager: RedisManager, key: str, reqs: Iterable[Dict[str, Any]]):
+    """推送请求到 Redis 队列"""
     for r in reqs:
         payload = {
             "url": r["url"],
@@ -66,18 +69,18 @@ def push_to_redis(redis_cli: Redis, key: str, reqs: Iterable[Dict[str, Any]]):
         }
         if r.get("params"):
             payload["meta"]["params"] = r["params"]
-        redis_cli.lpush(key, json.dumps(payload, ensure_ascii=False))
+        redis_manager.lpush(key, json.dumps(payload, ensure_ascii=False))
 
 
 def main():
     redis_key = os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
-    engine = get_mysql_engine()
-    redis_cli = get_redis_client()
-    reqs = list(fetch_pending_requests(engine))
+    db_manager = get_mysql_manager()
+    redis_manager = get_redis_manager()
+    reqs = list(fetch_pending_requests(db_manager))
     if not reqs:
         print("no pending requests")
         return
-    push_to_redis(redis_cli, redis_key, reqs)
+    push_to_redis(redis_manager, redis_key, reqs)
     print(f"pushed {len(reqs)} requests to redis list {redis_key}")
 
 

@@ -6,8 +6,8 @@ from crawler.utils.env_loader import load_env_file
 load_env_file()
 
 import scrapy
-from redis import Redis
 from scrapy_redis.spiders import RedisSpider
+from crawler.utils.redis_manager import RedisManager
 
 
 class FetchSpider(RedisSpider):
@@ -18,8 +18,7 @@ class FetchSpider(RedisSpider):
         super().__init__(*args, **kwargs)
         success_key = kwargs.get("success_key") or os.getenv("SUCCESS_QUEUE_KEY", "fetch_spider:success")
         self.success_key = success_key
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        self.redis_cli = Redis.from_url(redis_url)
+        self.redis_manager = RedisManager.from_env(decode_responses=False)
 
     def make_request_from_data(self, data):
         payload = json.loads(data)
@@ -59,5 +58,5 @@ class FetchSpider(RedisSpider):
             "meta": response.meta,
             "requested_at": requested_at,
         }
-        self.redis_cli.lpush(self.success_key, json.dumps(record, ensure_ascii=False))
+        self.redis_manager.lpush(self.success_key, json.dumps(record, ensure_ascii=False))
 

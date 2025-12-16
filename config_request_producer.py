@@ -9,6 +9,7 @@ from redis import Redis
 
 from crawler.utils.config_loader import load_config
 from crawler.utils.env_loader import load_env_file
+from crawler.utils.redis_manager import RedisManager
 
 load_env_file()
 
@@ -48,16 +49,16 @@ def build_initial_request(config: Dict[str, Any]) -> Dict[str, Any]:
 
 def main():
     config_path = os.getenv("CONFIG_PATH", "demo.json")
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     start_key = os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
 
     config = load_config(config_path)
     payload = build_initial_request(config)
 
     try:
-        redis_cli = Redis.from_url(redis_url, decode_responses=False)
-        redis_cli.ping()
-        redis_cli.lpush(start_key, json.dumps(payload, ensure_ascii=False))
+        redis_manager = RedisManager.from_env(decode_responses=False)
+        if not redis_manager.test_connection():
+            raise RuntimeError("Redis connection test failed")
+        redis_manager.lpush(start_key, json.dumps(payload, ensure_ascii=False))
         print(f"[producer] 已推送初始请求到 {start_key}: {payload['url']}")
     except Exception as e:
         error_msg = str(e)

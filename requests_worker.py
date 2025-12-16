@@ -12,6 +12,7 @@ import requests
 from redis import Redis
 
 from crawler.utils.env_loader import load_env_file
+from crawler.utils.redis_manager import RedisManager
 
 load_env_file()
 
@@ -19,7 +20,7 @@ load_env_file()
 class RequestsWorker:
     def __init__(
         self,
-        redis_url: Optional[str] = None,
+        redis_manager: Optional[RedisManager] = None,
         start_key: Optional[str] = None,
         success_key: Optional[str] = None,
         timeout: int = 30,
@@ -30,60 +31,40 @@ class RequestsWorker:
         初始化请求工作器
         
         Args:
-            redis_url: Redis 连接 URL
+            redis_manager: Redis 管理器
             start_key: 待请求任务队列键
             success_key: 成功结果队列键
             timeout: 请求超时时间（秒）
             max_retries: 最大重试次数
             retry_delay: 重试延迟（秒）
         """
-        redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
         self.start_key = start_key or os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
         self.success_key = success_key or os.getenv("SUCCESS_QUEUE_KEY", "fetch_spider:success")
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         
-        # 调试信息：显示读取到的 REDIS_URL（隐藏密码）
-        def _mask_password(url: str) -> str:
-            """隐藏 Redis URL 中的密码"""
-            if "@" in url:
-                parts = url.split("@")
-                if "://" in parts[0]:
-                    protocol_part = parts[0]
-                    if "://:" in protocol_part:
-                        # redis://:password@host
-                        return protocol_part.split("://")[0] + "://:***@" + parts[1]
-                    elif "://" in protocol_part and ":" in protocol_part.split("://")[1]:
-                        # redis://user:password@host
-                        user_pass = protocol_part.split("://")[1]
-                        user = user_pass.split(":")[0]
-                        return protocol_part.split("://")[0] + f"://{user}:***@" + parts[1]
-            return url
+        # 初始化 Redis 管理器
+        if redis_manager is None:
+            redis_manager = RedisManager.from_env(decode_responses=False)
         
-        print(f"[requests_worker] 读取 REDIS_URL: {_mask_password(redis_url)}")
+        self.redis_manager = redis_manager
         
-        # 初始化 Redis 连接并测试
+        # 测试连接
+        print(f"[requests_worker] 读取 REDIS_URL: {self.redis_manager.get_masked_url()}")
         try:
-            self.redis_cli = Redis.from_url(redis_url, decode_responses=False)
-            # 测试连接
-            self.redis_cli.ping()
+            if not self.redis_manager.test_connection():
+                raise RuntimeError("Redis connection test failed")
             print(f"[requests_worker] ✓ Redis 连接成功")
         except Exception as e:
             error_msg = str(e)
             if "Authentication required" in error_msg or "NOAUTH" in error_msg:
                 print(f"[requests_worker] ❌ Redis 认证失败！")
-                print(f"[requests_worker] 使用的 REDIS_URL: {_mask_password(redis_url)}")
+                print(f"[requests_worker] 使用的 REDIS_URL: {self.redis_manager.get_masked_url()}")
                 print(f"[requests_worker] 请检查：")
                 print(f"[requests_worker]   1. .env 文件是否在项目根目录")
                 print(f"[requests_worker]   2. REDIS_URL 格式是否正确")
                 print(f"[requests_worker]   3. 密码是否正确（格式: redis://:password@host:port/db）")
-                # 检查环境变量
-                env_redis_url = os.getenv("REDIS_URL")
-                if env_redis_url and env_redis_url != redis_url:
-                    print(f"[requests_worker]   注意: 系统环境变量 REDIS_URL 与读取的值不同")
-                    print(f"[requests_worker]   环境变量: {_mask_password(env_redis_url)}")
-                    print(f"[requests_worker]   实际使用: {_mask_password(redis_url)}")
             else:
                 print(f"[requests_worker] ❌ Redis 连接失败: {error_msg}")
                 print(f"[requests_worker] 请检查 Redis 服务是否运行，以及 REDIS_URL 配置是否正确")
@@ -112,7 +93,7 @@ class RequestsWorker:
         while True:
             try:
                 # 从 Redis 队列阻塞读取任务（超时 5 秒）
-                result = self.redis_cli.brpop(self.start_key, timeout=5)
+                result = self.redis_manager.brpop([self.start_key], timeout=5)
                 if not result:
                     time.sleep(sleep_seconds)
                     continue
@@ -233,7 +214,7 @@ class RequestsWorker:
         }
         
         # 保存到 Redis 成功队列
-        self.redis_cli.lpush(self.success_key, json.dumps(record, ensure_ascii=False))
+        self.redis_manager.lpush(self.success_key, json.dumps(record, ensure_ascii=False))
         
         if response:
             print(f"[requests_worker] ✓ 请求成功: {url} (状态码: {response.status_code}, 长度: {len(response.text)} 字节)")
@@ -254,7 +235,7 @@ def main():
     sleep_seconds = float(os.getenv("REQUESTS_SLEEP", "1.0"))
     
     worker = RequestsWorker(
-        redis_url=None,  # 使用环境变量中的 REDIS_URL
+        redis_manager=None,  # 使用环境变量中的 REDIS_URL
         start_key=None,  # 使用环境变量中的 SCRAPY_START_KEY
         success_key=None,  # 使用环境变量中的 SUCCESS_QUEUE_KEY
         timeout=timeout,
