@@ -54,9 +54,20 @@ def main():
     config = load_config(config_path)
     payload = build_initial_request(config)
 
-    redis_cli = Redis.from_url(redis_url)
-    redis_cli.lpush(start_key, json.dumps(payload, ensure_ascii=False))
-    print(f"[producer] 已推送初始请求到 {start_key}: {payload['url']}")
+    try:
+        redis_cli = Redis.from_url(redis_url, decode_responses=False)
+        redis_cli.ping()
+        redis_cli.lpush(start_key, json.dumps(payload, ensure_ascii=False))
+        print(f"[producer] 已推送初始请求到 {start_key}: {payload['url']}")
+    except Exception as e:
+        error_msg = str(e)
+        if "Authentication required" in error_msg or "NOAUTH" in error_msg:
+            print(f"[producer] ❌ Redis 认证失败！")
+            print(f"[producer] 请检查 .env 文件中的 REDIS_URL 配置")
+            print(f"[producer] 格式: redis://:password@host:port/db")
+        else:
+            print(f"[producer] ❌ Redis 连接失败: {error_msg}")
+        raise
 
 
 if __name__ == "__main__":

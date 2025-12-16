@@ -219,7 +219,20 @@ def main():
     config_path = os.getenv("CONFIG_PATH", "demo.json")
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     config = load_config(config_path)
-    redis_cli = Redis.from_url(redis_url)
+    
+    try:
+        redis_cli = Redis.from_url(redis_url, decode_responses=False)
+        redis_cli.ping()
+        print(f"[success_worker] Redis 连接成功")
+    except Exception as e:
+        error_msg = str(e)
+        if "Authentication required" in error_msg or "NOAUTH" in error_msg:
+            print(f"[success_worker] ❌ Redis 认证失败！")
+            print(f"[success_worker] 请检查 .env 文件中的 REDIS_URL 配置")
+            print(f"[success_worker] 格式: redis://:password@host:port/db")
+        else:
+            print(f"[success_worker] ❌ Redis 连接失败: {error_msg}")
+        raise
 
     processor = WorkflowProcessor(config, redis_cli)
     processor.run_forever()

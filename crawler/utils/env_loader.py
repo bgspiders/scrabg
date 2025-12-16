@@ -43,8 +43,16 @@ def load_env_file(env_path: Optional[str] = None) -> bool:
     env_file = Path(env_path) if isinstance(env_path, str) else env_path
     
     if env_file.exists():
-        load_dotenv(env_file, override=False)  # override=False 表示环境变量优先
-        return True
+        result = load_dotenv(env_file, override=False)  # override=False 表示环境变量优先
+        if result:
+            # 调试模式：可以通过环境变量启用
+            if os.getenv("DEBUG_ENV_LOAD", "").lower() in ("1", "true", "yes"):
+                print(f"[env_loader] 已加载 .env 文件: {env_file}")
+        return result
+    else:
+        # 调试模式：显示未找到 .env 文件
+        if os.getenv("DEBUG_ENV_LOAD", "").lower() in ("1", "true", "yes"):
+            print(f"[env_loader] 未找到 .env 文件: {env_file}")
     
     return False
 

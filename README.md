@@ -33,6 +33,7 @@ scrabg/
 ├── .env.example               # 环境变量配置示例文件
 ├── demo.json                  # 示例配置文件
 ├── config_request_producer.py # 根据 demo.json 生成初始请求
+├── requests_worker.py         # 使用 requests 库的请求工作器
 ├── success_worker.py          # 解析成功队列并推进 workflow
 ├── producer_push_from_mysql.py # MySQL 任务推送脚本（可选）
 ├── requirements.txt           # Python 依赖
@@ -231,11 +232,23 @@ scrapy crawl fetch_spider
    ```
    读取 `demo.json`，生成 `workflow_index=0` 的初始请求并写入 `SCRAPY_START_KEY`。
 
-2. **Scrapy 仅负责请求**
+2. **发送请求（两种方式可选）**
+
+   **方式 A：使用 Scrapy（推荐用于大规模分布式）**
    ```bash
    scrapy crawl fetch_spider -L INFO
    ```
    `fetch_spider` 把响应写回 `SUCCESS_QUEUE_KEY`，不做任何解析。
+
+   **方式 B：使用 requests 库（轻量级，适合单机）**
+   ```bash
+   python requests_worker.py
+   ```
+   `requests_worker` 使用 Python requests 库发送请求，功能与 `fetch_spider` 相同，但更轻量级。
+   支持命令行参数：
+   ```bash
+   python requests_worker.py --timeout 30 --max-retries 3 --retry-delay 1.0
+   ```
 
 3. **success_worker 解析 workflow**
    ```bash
