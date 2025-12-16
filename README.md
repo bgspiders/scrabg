@@ -2,7 +2,8 @@
 
 基于 Scrapy-Redis 的分布式爬虫系统，支持从配置文件或 MySQL 数据库读取任务，将数据保存到 MySQL。
 
-
+## 配套前后端
+项目详见：https://github.com/bgspiders/scrabg_web
 ## 功能特性
 
 - ✅ 基于 Scrapy-Redis 的分布式爬虫架构
