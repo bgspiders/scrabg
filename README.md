@@ -2,8 +2,6 @@
 
 基于 Scrapy-Redis 的分布式爬虫系统，支持从配置文件或 MySQL 数据库读取任务，将数据保存到 MySQL。
 
-## 配套前后端
-项目详见：https://github.com/bgspiders/scrabg_web
 ## 功能特性
 
 - ✅ 基于 Scrapy-Redis 的分布式爬虫架构
@@ -75,54 +73,15 @@ pip install -r requirements.txt
 
 **推荐方式：使用 .env 文件**
 
-复制 `.env.example` 文件并重命名为 `.env`，然后修改其中的配置：
-
-```bash
-# 复制示例配置文件
-cp .env.example .env
-
-# 编辑 .env 文件，填入你的配置信息
-# Redis 配置
-REDIS_URL=redis://localhost:6379/0
-
-# MySQL 配置
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=your_username
-MYSQL_PASSWORD=your_password
-MYSQL_DB=your_database
-MYSQL_CHARSET=utf8mb4
-
-# Scrapy 配置（可选）
-CONFIG_PATH=demo.json
-LOG_LEVEL=INFO
-
-# 爬虫队列配置（可选）
-SCRAPY_START_KEY=fetch_spider:start_urls
-SUCCESS_QUEUE_KEY=fetch_spider:success
-```
-
-**注意：** `.env` 文件已添加到 `.gitignore`，不会被提交到版本控制。
+复制 `.env.example` 文件并重命名为 `.env`，然后修改其中的配置
+**注意：** `.env` 文件已添加到 `.gitignore`，不会被提交到版本控制。mongo比mysql等级高
 
 **密码配置说明：**
 - Redis 密码：在 `REDIS_URL` 中配置，格式：`redis://:password@host:port/db`
 - MySQL 密码：在 `MYSQL_PASSWORD` 中配置，如果包含特殊字符（如 `@`、`#`、`$` 等），需要用引号包裹
+- MONGODB 密码：在 `MONGODB_URI` 中配置，格式：`mongodb://username:password@host:port/db`
 - 详细配置说明请参考：[ENV_CONFIG.md](ENV_CONFIG.md)
 
-**备选方式：直接设置环境变量**
-
-如果不使用 `.env` 文件，也可以直接设置环境变量：
-
-```bash
-export REDIS_URL="redis://localhost:6379/0"
-export MYSQL_HOST="localhost"
-export MYSQL_PORT="3306"
-export MYSQL_USER="your_username"
-export MYSQL_PASSWORD="your_password"
-export MYSQL_DB="your_database"
-export CONFIG_PATH="demo.json"
-export LOG_LEVEL="INFO"
-```
 
 ### 4. 准备数据库
 
@@ -200,29 +159,8 @@ scrapy crawl config_spider -s CONFIG_PATH=/path/to/config.json
    - `data_extraction`: 提取数据
 4. 将提取的数据保存到 MySQL `articles` 表
 
-### 方式二：MySQL 任务推送 + 仅请求爬虫（fetch_spider）
 
-从 MySQL 读取任务，Scrapy 仅负责请求，结果保存到 Redis：
-
-```bash
-# 激活虚拟环境
-source scrabgs/bin/activate
-
-# 1. 从 MySQL 推送任务到 Redis
-python producer_push_from_mysql.py
-
-# 2. 启动爬虫（可启动多个实例实现分布式）
-scrapy crawl fetch_spider
-```
-
-**工作流程：**
-1. `producer_push_from_mysql.py` 从 `pending_requests` 表读取任务
-2. 解析请求参数，推送到 Redis 队列 `fetch_spider:start_urls`
-3. `fetch_spider` 从 Redis 消费请求
-4. 发送 HTTP 请求，将响应保存到 Redis 队列 `fetch_spider:success`
-5. 后续可由其他程序从 `fetch_spider:success` 队列读取并解析
-
-### 方式三：demo.json 驱动 + 全链路 Redis
+### 方式二：demo.json 驱动 + 全链路 Redis
 
 该模式完全遵循 `demo.json` 的 `workflowSteps`，Scrapy 只负责请求，解析由外部脚本完成：
 
@@ -245,11 +183,7 @@ scrapy crawl fetch_spider
    ```bash
    python requests_worker.py
    ```
-   `requests_worker` 使用 Python requests 库发送请求，功能与 `fetch_spider` 相同，但更轻量级。
-   支持命令行参数：
-   ```bash
-   python requests_worker.py --timeout 30 --max-retries 3 --retry-delay 1.0
-   ```
+   `requests_worker` 使用 Python requests 库发送请求，功能与 `fetch_spider` 相同，但更轻量级。使用其他指纹库相同效果，可自行替换。
 
 3. **success_worker 解析 workflow**
    ```bash
@@ -367,25 +301,34 @@ print('工作流步骤数:', len(config['workflowSteps']))
 ```bash
 source scrabgs/bin/activate
 # 确保 MySQL 中有测试数据
-python producer_push_from_mysql.py
+ python config_request_producer.py
 
 # 检查 Redis 队列
 redis-cli LLEN fetch_spider:start_urls
 ```
+示例图片 ![推送任务](./docs/img/img_2.png)
+
 
 #### 5. 测试爬虫运行
 
 ```bash
 source scrabgs/bin/activate
 
-# 测试 config_spider（使用配置文件）
-scrapy crawl config_spider -L INFO
-
 # 测试 fetch_spider（从 Redis 消费）
 scrapy crawl fetch_spider -L INFO
+#使用requests队列
+python requests_worker.py
 ```
+示例图片 ![爬虫运行](./docs/img/img.png)
+#### 6. 测试解析节点
 
-#### 6. 验证数据保存
+```bash
+source scrabgs/bin/activate
+#使用requests队列
+python success_worker.py
+```
+示例图片 ![解析节点](./docs/img/img_1.png)
+#### 7. 验证数据保存
 
 ```sql
 -- 检查 articles 表中的数据
@@ -393,7 +336,23 @@ SELECT * FROM articles ORDER BY created_at DESC LIMIT 10;
 
 -- 检查成功队列中的数据（需要从 Redis 读取）
 redis-cli LRANGE fetch_spider:success 0 9
+在数据库中查看数据mysql中是articles，mongodb中是items
 ```
+mongo是整体保存，mysql分表保存
+mongo数据库截图
+![数据保存](./docs/img/img_3.png)
+mysql数据库截图-列表
+![数据保存](./docs/img/img_4.png)
+mysql数据库截图-详情
+![数据保存](./docs/img/img_7.png)
+### 8. 前端保存结果界面
+界面截图，可以进行查询，点击可以查看详情
+mongo数据库截图
+![数据保存](./docs/img/img_5.png)
+mysql版本
+![数据保存](./docs/img/img_6.png)
+
+
 
 ## 分布式部署
 

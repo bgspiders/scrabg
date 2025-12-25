@@ -13,6 +13,7 @@ from redis import Redis
 
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
+from crawler.utils.proxy_manager import ProxyManager
 
 load_env_file()
 
@@ -26,6 +27,7 @@ class RequestsWorker:
         timeout: int = 30,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        proxy_manager: Optional[ProxyManager] = None,
     ):
         """
         初始化请求工作器
@@ -37,12 +39,18 @@ class RequestsWorker:
             timeout: 请求超时时间（秒）
             max_retries: 最大重试次数
             retry_delay: 重试延迟（秒）
+            proxy_manager: 代理管理器
         """
         self.start_key = start_key or os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
         self.success_key = success_key or os.getenv("SUCCESS_QUEUE_KEY", "fetch_spider:success")
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        
+        # 初始化代理管理器
+        if proxy_manager is None:
+            proxy_manager = ProxyManager.from_env()
+        self.proxy_manager = proxy_manager
         
         # 初始化 Redis 管理器
         if redis_manager is None:
@@ -76,6 +84,15 @@ class RequestsWorker:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
         })
+        
+        # 打印代理配置信息
+        if self.proxy_manager.is_enabled():
+            print(f"[requests_worker] ✓ 代理已启用，模式: {self.proxy_manager.mode}")
+            if self.proxy_manager.mode == "dynamic":
+                print(f"[requests_worker]   动态代理API: {self.proxy_manager.dynamic_api}")
+                print(f"[requests_worker]   刷新间隔: {self.proxy_manager.refresh_interval}秒")
+        else:
+            print(f"[requests_worker] 不使用代理")
 
     def run_forever(self, sleep_seconds: float = 1.0):
         """
@@ -146,6 +163,9 @@ class RequestsWorker:
                 # 合并 headers
                 request_headers = {**self.session.headers, **headers}
                 
+                # 获取代理配置
+                proxies = self.proxy_manager.get_proxies()
+                
                 # 发送请求
                 if method == "GET":
                     response = self.session.get(
@@ -154,6 +174,7 @@ class RequestsWorker:
                         params=params,
                         timeout=self.timeout,
                         allow_redirects=True,
+                        proxies=proxies,
                     )
                 elif method == "POST":
                     data = payload.get("data")
@@ -166,6 +187,7 @@ class RequestsWorker:
                         json=json_data,
                         timeout=self.timeout,
                         allow_redirects=True,
+                        proxies=proxies,
                     )
                 else:
                     # 支持其他方法
@@ -178,6 +200,7 @@ class RequestsWorker:
                         json=payload.get("json"),
                         timeout=self.timeout,
                         allow_redirects=True,
+                        proxies=proxies,
                     )
                 
                 # 请求成功，跳出重试循环

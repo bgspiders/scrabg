@@ -197,6 +197,346 @@ class DatabaseManager:
             
             return article_id
     
+    def get_article_by_id(self, article_id: int, include_content: bool = True) -> Optional[Dict[str, Any]]:
+        """
+        根据文章 ID 获取文章详情
+        
+        Args:
+            article_id: 文章 ID
+            include_content: 是否包含文章内容（默认 True）
+            
+        Returns:
+            文章数据字典，如果不存在返回 None
+        """
+        import json
+        
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        with self._engine.connect() as conn:
+            # 查询文章主表
+            article_query = """
+                SELECT id, task_id, title, link, source_url, extra, created_at
+                FROM articles
+                WHERE id = :article_id
+            """
+            result = conn.execute(text(article_query), {"article_id": article_id})
+            row = result.fetchone()
+            
+            if not row:
+                return None
+            
+            article = {
+                "id": row[0],
+                "task_id": row[1],
+                "title": row[2],
+                "link": row[3],
+                "source_url": row[4],
+                "extra": json.loads(row[5]) if row[5] else {},
+                "created_at": row[6],
+            }
+            
+            # 如果需要，查询文章内容
+            if include_content:
+                content_query = """
+                    SELECT content
+                    FROM article_contents
+                    WHERE article_id = :article_id
+                """
+                content_result = conn.execute(text(content_query), {"article_id": article_id})
+                content_row = content_result.fetchone()
+                article["content"] = content_row[0] if content_row else ""
+            
+            return article
+    
+    def get_articles_by_task_id(
+        self,
+        task_id: str,
+        include_content: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Dict[str, Any]]:
+        """
+        根据任务 ID 获取文章列表
+        
+        Args:
+            task_id: 任务 ID
+            include_content: 是否包含文章内容（默认 False，避免数据量过大）
+            limit: 返回数量限制（默认 100）
+            offset: 偏移量（默认 0）
+            
+        Returns:
+            文章列表
+        """
+        import json
+        
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        with self._engine.connect() as conn:
+            # 查询文章列表
+            query = """
+                SELECT id, task_id, title, link, source_url, extra, created_at
+                FROM articles
+                WHERE task_id = :task_id
+                ORDER BY created_at DESC
+                LIMIT :limit OFFSET :offset
+            """
+            result = conn.execute(text(query), {
+                "task_id": str(task_id),
+                "limit": limit,
+                "offset": offset,
+            })
+            
+            articles = []
+            for row in result:
+                article = {
+                    "id": row[0],
+                    "task_id": row[1],
+                    "title": row[2],
+                    "link": row[3],
+                    "source_url": row[4],
+                    "extra": json.loads(row[5]) if row[5] else {},
+                    "created_at": row[6],
+                }
+                
+                # 如果需要，查询文章内容
+                if include_content:
+                    content_query = """
+                        SELECT content
+                        FROM article_contents
+                        WHERE article_id = :article_id
+                    """
+                    content_result = conn.execute(text(content_query), {"article_id": article["id"]})
+                    content_row = content_result.fetchone()
+                    article["content"] = content_row[0] if content_row else ""
+                
+                articles.append(article)
+            
+            return articles
+    
+    def count_articles_by_task_id(self, task_id: str) -> int:
+        """
+        统计指定任务的文章数量
+        
+        Args:
+            task_id: 任务 ID
+            
+        Returns:
+            文章数量
+        """
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        with self._engine.connect() as conn:
+            query = """
+                SELECT COUNT(*) as total
+                FROM articles
+                WHERE task_id = :task_id
+            """
+            result = conn.execute(text(query), {"task_id": str(task_id)})
+            row = result.fetchone()
+            return row[0] if row else 0
+    
+    def get_all_articles(
+        self,
+        include_content: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+        order_by: str = "created_at",
+        order_direction: str = "DESC",
+    ) -> list[Dict[str, Any]]:
+        """
+        获取所有文章列表
+        
+        Args:
+            include_content: 是否包含文章内容（默认 False）
+            limit: 返回数量限制（默认 100）
+            offset: 偏移量（默认 0）
+            order_by: 排序字段（默认 created_at）
+            order_direction: 排序方向（ASC/DESC，默认 DESC）
+            
+        Returns:
+            文章列表
+        """
+        import json
+        
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        # 验证排序字段和方向
+        allowed_order_fields = ["id", "task_id", "title", "created_at"]
+        if order_by not in allowed_order_fields:
+            order_by = "created_at"
+        
+        if order_direction.upper() not in ["ASC", "DESC"]:
+            order_direction = "DESC"
+        
+        with self._engine.connect() as conn:
+            query = f"""
+                SELECT id, task_id, title, link, source_url, extra, created_at
+                FROM articles
+                ORDER BY {order_by} {order_direction}
+                LIMIT :limit OFFSET :offset
+            """
+            result = conn.execute(text(query), {
+                "limit": limit,
+                "offset": offset,
+            })
+            
+            articles = []
+            for row in result:
+                article = {
+                    "id": row[0],
+                    "task_id": row[1],
+                    "title": row[2],
+                    "link": row[3],
+                    "source_url": row[4],
+                    "extra": json.loads(row[5]) if row[5] else {},
+                    "created_at": row[6],
+                }
+                
+                # 如果需要，查询文章内容
+                if include_content:
+                    content_query = """
+                        SELECT content
+                        FROM article_contents
+                        WHERE article_id = :article_id
+                    """
+                    content_result = conn.execute(text(content_query), {"article_id": article["id"]})
+                    content_row = content_result.fetchone()
+                    article["content"] = content_row[0] if content_row else ""
+                
+                articles.append(article)
+            
+            return articles
+    
+    def count_all_articles(self) -> int:
+        """
+        统计所有文章总数
+        
+        Returns:
+            文章总数
+        """
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        with self._engine.connect() as conn:
+            query = "SELECT COUNT(*) as total FROM articles"
+            result = conn.execute(text(query))
+            row = result.fetchone()
+            return row[0] if row else 0
+    
+    def delete_article(self, article_id: int) -> bool:
+        """
+        删除指定文章（包括文章内容）
+        
+        Args:
+            article_id: 文章 ID
+            
+        Returns:
+            是否删除成功
+        """
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        try:
+            with self._engine.begin() as conn:
+                # 1. 删除文章内容
+                content_query = """
+                    DELETE FROM article_contents
+                    WHERE article_id = :article_id
+                """
+                conn.execute(text(content_query), {"article_id": article_id})
+                
+                # 2. 删除文章主表
+                article_query = """
+                    DELETE FROM articles
+                    WHERE id = :article_id
+                """
+                result = conn.execute(text(article_query), {"article_id": article_id})
+                
+                return result.rowcount > 0
+        except Exception as e:
+            print(f"[DatabaseManager] 删除文章失败: {e}")
+            return False
+    
+    def delete_articles_by_task_id(self, task_id: str) -> int:
+        """
+        删除指定任务的所有文章
+        
+        Args:
+            task_id: 任务 ID
+            
+        Returns:
+            删除的文章数量
+        """
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        try:
+            with self._engine.begin() as conn:
+                # 1. 获取该任务下的所有文章 ID
+                get_ids_query = """
+                    SELECT id FROM articles WHERE task_id = :task_id
+                """
+                result = conn.execute(text(get_ids_query), {"task_id": str(task_id)})
+                article_ids = [row[0] for row in result]
+                
+                if not article_ids:
+                    return 0
+                
+                # 2. 删除文章内容
+                content_query = """
+                    DELETE FROM article_contents
+                    WHERE article_id IN :article_ids
+                """
+                conn.execute(text(content_query), {"article_ids": tuple(article_ids)})
+                
+                # 3. 删除文章主表
+                article_query = """
+                    DELETE FROM articles
+                    WHERE task_id = :task_id
+                """
+                result = conn.execute(text(article_query), {"task_id": str(task_id)})
+                
+                return result.rowcount
+        except Exception as e:
+            print(f"[DatabaseManager] 批量删除文章失败: {e}")
+            return 0
+    
+    def get_task_statistics(self) -> list[Dict[str, Any]]:
+        """
+        获取各任务的文章统计信息
+        
+        Returns:
+            统计信息列表，每项包含 task_id, article_count, latest_created_at
+        """
+        if not self._engine:
+            raise RuntimeError("Database engine not initialized")
+        
+        with self._engine.connect() as conn:
+            query = """
+                SELECT 
+                    task_id,
+                    COUNT(*) as article_count,
+                    MAX(created_at) as latest_created_at
+                FROM articles
+                GROUP BY task_id
+                ORDER BY latest_created_at DESC
+            """
+            result = conn.execute(text(query))
+            
+            statistics = []
+            for row in result:
+                statistics.append({
+                    "task_id": row[0],
+                    "article_count": row[1],
+                    "latest_created_at": row[2],
+                })
+            
+            return statistics
+    
     def close(self):
         """关闭数据库连接"""
         if self._engine:

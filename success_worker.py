@@ -13,6 +13,7 @@ from redis import Redis
 
 from crawler.utils.config_loader import load_config
 from crawler.utils.db_manager import DatabaseManager
+from crawler.utils.mongodb_manager import MongoDBManager
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
 
@@ -20,10 +21,11 @@ load_env_file()
 
 
 class WorkflowProcessor:
-    def __init__(self, config: Dict[str, Any], redis_manager: RedisManager, db_manager: Optional[DatabaseManager] = None):
+    def __init__(self, config: Dict[str, Any], redis_manager: RedisManager, db_manager: Optional[DatabaseManager] = None, mongodb_manager: Optional[MongoDBManager] = None):
         self.config = config
         self.redis_manager = redis_manager
         self.db_manager = db_manager
+        self.mongodb_manager = mongodb_manager
         self.steps = config.get("workflowSteps", [])
         self.task_info = config.get("taskInfo", {})
         self.start_key = os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
@@ -149,10 +151,13 @@ class WorkflowProcessor:
         
         if is_last_step and not has_next_request:
             # Save to database if it's the last step and no custom code to generate next requests
-            if self.db_manager and self.db_manager.engine:
+            # Priority: MongoDB > MySQL > Redis
+            if self.mongodb_manager is not None and self.mongodb_manager.client is not None:
+                self._save_to_mongodb(item)
+            elif self.db_manager is not None and self.db_manager.engine is not None:
                 self._save_to_database(item)
             else:
-                # Fallback to Redis if database is not configured
+                # Fallback to Redis if no database is configured
                 self.redis_manager.lpush(self.data_key, json.dumps(item, ensure_ascii=False))
                 print(f"[worker] 数据已写入 Redis {self.data_key}: {response['url']}")
         else:
@@ -214,13 +219,47 @@ class WorkflowProcessor:
                 source_url=source_url,
                 extra=extra,
             )
-            print(f"[worker] ✓ 数据已保存到数据库: {source_url}")
+            print(f"[worker] ✓ 数据已保存到 MySQL: {source_url}")
         except Exception as e:
-            print(f"[worker] ✗ 保存到数据库失败: {e}")
+            print(f"[worker] ✗ 保存到 MySQL 失败: {e}")
             # Fallback: save to Redis error queue
             self.redis_manager.lpush(
                 self.error_key,
-                json.dumps({"error": f"Database save failed: {str(e)}", "item": item}, ensure_ascii=False),
+                json.dumps({"error": f"MySQL save failed: {str(e)}", "item": item}, ensure_ascii=False),
+            )
+    
+    def _save_to_mongodb(self, item: Dict[str, Any]):
+        """Save extracted data to MongoDB"""
+        try:
+            data = item.get("data", {})
+            context = item.get("context", {})
+            source_url = item.get("source_url", "")
+            
+            # Merge context and data for extra field
+            extra = {**context}
+            
+            # link defaults to source_url if not provided
+            link = context.get("link") or source_url
+            
+            # Use MongoDBManager to save article
+            article_id = self.mongodb_manager.save_article(
+                task_id=item.get("task_id"),
+                title=data.get("title") or context.get("title") or "",
+                link=link,
+                content=data.get("content") or "",
+                source_url=source_url,
+                extra=extra,
+            )
+            if article_id:
+                print(f"[worker] ✓ 数据已保存到 MongoDB (ID: {article_id}): {source_url}")
+            else:
+                raise Exception("保存返回空 ID")
+        except Exception as e:
+            print(f"[worker] ✗ 保存到 MongoDB 失败: {e}")
+            # Fallback: save to Redis error queue
+            self.redis_manager.lpush(
+                self.error_key,
+                json.dumps({"error": f"MongoDB save failed: {str(e)}", "item": item}, ensure_ascii=False),
             )
 
     def _run_custom_code(
@@ -299,8 +338,22 @@ def main():
         print(f"[success_worker] ⚠️  MySQL 连接失败: {e}")
         print(f"[success_worker] 将使用 Redis 队列存储数据")
         db_manager = None
+    
+    # Create MongoDB manager (optional)
+    mongodb_manager = None
+    try:
+        mongodb_manager = MongoDBManager.from_env()
+        if mongodb_manager.client is not None and mongodb_manager.test_connection():
+            print(f"[success_worker] ✓ MongoDB 连接成功: {mongodb_manager.get_masked_uri()}")
+            print(f"[success_worker] ✓ MongoDB 数据库: {mongodb_manager.database_name}, 集合: {mongodb_manager.collection_name}")
+        else:
+            print(f"[success_worker] ⚠️  MongoDB 配置不完整")
+            mongodb_manager = None
+    except Exception as e:
+        print(f"[success_worker] ⚠️  MongoDB 连接失败: {e}")
+        mongodb_manager = None
 
-    processor = WorkflowProcessor(config, redis_manager, db_manager)
+    processor = WorkflowProcessor(config, redis_manager, db_manager, mongodb_manager)
     processor.run_forever()
 
 

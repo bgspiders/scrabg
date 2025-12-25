@@ -37,6 +37,11 @@ MYSQL_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
 MYSQL_POOL_SIZE = int(os.getenv("MYSQL_POOL_SIZE", "5"))
 MYSQL_POOL_MAX_OVERFLOW = int(os.getenv("MYSQL_POOL_MAX_OVERFLOW", "5"))
 
+# 下载中间件（包括代理中间件）
+DOWNLOADER_MIDDLEWARES = {
+    "crawler.middlewares.proxy_middleware.ProxyMiddleware": 100,
+}
+
 ITEM_PIPELINES = {
     "crawler.pipelines.MySQLStorePipeline": 300,
 }
@@ -44,5 +49,5 @@ ITEM_PIPELINES = {
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
 # 允许通过环境变量传入配置文件路径
-CONFIG_PATH = os.getenv("CONFIG_PATH", "/Users/bgspider/websites/scrabg/demo.json")
+CONFIG_PATH = os.getenv("CONFIG_PATH", "demo.json")
 
