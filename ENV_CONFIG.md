@@ -255,15 +255,6 @@ MONGODB_DB=scra
 MONGODB_COLLECTION=articles
 ```
 
-### 示例 6：使用 MongoDB Atlas 云数据库
-```bash
-REDIS_URL=redis://localhost:6379/0
-
-# MongoDB Atlas 配置
-MONGODB_URI=mongodb+srv://username:password@cluster0.mongodb.net/scra?retryWrites=true&w=majority
-MONGODB_DB=scra
-MONGODB_COLLECTION=articles
-```
 
 ### 示例 7：使用固定代理
 ```bash
