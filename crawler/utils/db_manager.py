@@ -1,12 +1,13 @@
-"""
-数据库管理工具：统一管理 MySQL 连接和配置
-"""
+"""数据库管理工具：统一管理 MySQL 连接和配置"""
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+
+from crawler.utils.timezone_helper import TimezoneHelper
+
 
 
 class DatabaseManager:
@@ -146,6 +147,7 @@ class DatabaseManager:
     ) -> int:
         """
         保存文章到数据库（文章主表 + 内容表）
+        使用链接哈希和内容哈希进行去重判断
         
         Args:
             task_id: 任务 ID
@@ -156,42 +158,58 @@ class DatabaseManager:
             extra: 额外数据（JSON 格式）
             
         Returns:
-            插入的文章 ID
+            插入的文章 ID（如果已存在则返回现有 ID）
         """
         import json
+        from crawler.utils.hash_helper import HashHelper
         
         if not self._engine:
             raise RuntimeError("Database engine not initialized")
         
+        # 计算链接哈希和内容哈希
+        link_hash = HashHelper.get_link_hash(link)
+        content_hash = HashHelper.get_content_hash(content)
+        
         # 使用事务保证数据一致性
         with self._engine.begin() as conn:
-            # 1. 插入文章主表（不包含 content）
+            # 1. 检查链接是否已存在（去重）
+            if link_hash:
+                check_query = "SELECT id FROM articles WHERE link_hash = :link_hash LIMIT 1"
+                result = conn.execute(text(check_query), {"link_hash": link_hash})
+                existing = result.fetchone()
+                if existing:
+                    print(f"[DatabaseManager] 链接已存在，跳过保存: {link}")
+                    return existing[0]
+            
+            # 2. 插入文章主表
             article_query = """
-                INSERT INTO articles(task_id, title, link, source_url, extra, created_at)
-                VALUES (:task_id, :title, :link, :source_url, :extra, :created_at)
+                INSERT INTO articles(task_id, title, link, link_hash, source_url, extra, created_at)
+                VALUES (:task_id, :title, :link, :link_hash, :source_url, :extra, :created_at)
             """
             article_params = {
                 "task_id": str(task_id),
                 "title": title or "",
                 "link": link or "",
+                "link_hash": link_hash,
                 "source_url": source_url or "",
                 "extra": json.dumps(extra or {}, ensure_ascii=False),
-                "created_at": datetime.utcnow(),
+                "created_at": TimezoneHelper.get_now(with_tz=False),
             }
             
             result = conn.execute(text(article_query), article_params)
             article_id = result.lastrowid
             
-            # 2. 如果有内容，插入到 article_contents 表
+            # 3. 如果有内容，插入到 article_contents 表（带内容哈希）
             if content:
                 content_query = """
-                    INSERT INTO article_contents(article_id, content, created_at)
-                    VALUES (:article_id, :content, :created_at)
+                    INSERT INTO article_contents(article_id, content, content_hash, created_at)
+                    VALUES (:article_id, :content, :content_hash, :created_at)
                 """
                 content_params = {
                     "article_id": article_id,
                     "content": content,
-                    "created_at": datetime.utcnow(),
+                    "content_hash": content_hash,
+                    "created_at": TimezoneHelper.get_now(with_tz=False),
                 }
                 conn.execute(text(content_query), content_params)
             

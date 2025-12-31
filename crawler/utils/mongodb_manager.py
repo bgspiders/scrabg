@@ -8,6 +8,8 @@ from typing import Any, Dict, Optional
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 
+from crawler.utils.timezone_helper import TimezoneHelper
+
 
 class MongoDBManager:
     """MongoDB 数据库管理器，提供统一的连接和操作接口"""
@@ -139,7 +141,7 @@ class MongoDBManager:
         extra: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
-        保存文章到 MongoDB
+        保存文章到 MongoDB，使用链接哈希进行去重判断
         
         Args:
             task_id: 任务 ID
@@ -150,23 +152,40 @@ class MongoDBManager:
             extra: 额外数据（字典格式）
             
         Returns:
-            插入的文档 ID（字符串格式），失败返回 None
+            插入的文档 ID（字符串格式），失败返回 None；如果已存在则返回现有 ID
         """
+        from crawler.utils.hash_helper import HashHelper
+        
         if self.collection is None:
             raise RuntimeError("MongoDB collection not initialized")
         
-        document = {
-            "task_id": str(task_id),
-            "title": title or "",
-            "link": link or "",
-            "content": content or "",
-            "source_url": source_url or "",
-            "extra": extra or {},
-            "created_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        }
+        # 计算链接哈希和内容哈希
+        link_hash = HashHelper.get_link_hash(link)
+        content_hash = HashHelper.get_content_hash(content)
         
         try:
+            # 1. 检查链接是否已存在（去重）
+            if link_hash:
+                existing = self.collection.find_one({"link_hash": link_hash})
+                if existing:
+                    print(f"[MongoDB] 链接已存在，跳过保存: {link}")
+                    return str(existing["_id"])
+            
+            # 2. 构建文档（包含哈希值）
+            document = {
+                "task_id": str(task_id),
+                "title": title or "",
+                "link": link or "",
+                "link_hash": link_hash,
+                "content": content or "",
+                "content_hash": content_hash,
+                "source_url": source_url or "",
+                "extra": extra or {},
+                "created_at": TimezoneHelper.get_now(with_tz=False),
+                "updated_at": TimezoneHelper.get_now(with_tz=False),
+            }
+            
+            # 3. 插入文档
             result = self.collection.insert_one(document)
             return str(result.inserted_id)
         except Exception as e:

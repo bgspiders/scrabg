@@ -14,6 +14,8 @@ from redis import Redis
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
 from crawler.utils.proxy_manager import ProxyManager
+from crawler.utils.encoding_handler import EncodingHandler
+from crawler.utils.timezone_helper import TimezoneHelper
 
 load_env_file()
 
@@ -225,16 +227,63 @@ class RequestsWorker:
                 print(f"[requests_worker] {error}")
                 break
         
-        # 构建结果记录
+        # 槨建结果记录
         record = {
             "url": url,
             "status": response.status_code if response else 0,
             "headers": dict(response.headers) if response else {},
             "body": response.text if response else "",
             "meta": meta,
-            "requested_at": datetime.utcnow().isoformat(),
+            "requested_at": TimezoneHelper.get_now_isoformat(),
             "error": error if error else None,
         }
+        
+        # 处理响应编码信息
+        if response:
+            try:
+                # 准备响应头字典
+                headers_dict = dict(response.headers) if response.headers else {}
+                
+                # 检查是否在 meta 中指定了编码
+                custom_encoding = meta.get("encoding") if meta else None
+                
+                # 处理编码
+                if custom_encoding:
+                    # 使用手动指定的编码
+                    try:
+                        decoded_text = response.content.decode(custom_encoding, errors='replace')
+                        encoding_info = {
+                            'encoding': custom_encoding,
+                            'confidence': 1.0,
+                            'source': 'manual',
+                            'methods': ['manual_config']
+                        }
+                    except (UnicodeDecodeError, LookupError):
+                        # 如果指定的编码失败，回退到自动检测
+                        decoded_text = EncodingHandler.decode_content(response.content, headers_dict)
+                        encoding_info = EncodingHandler.get_encoding_info(response.content, headers_dict)
+                else:
+                    # 自动检测编码
+                    decoded_text = EncodingHandler.decode_content(response.content, headers_dict)
+                    encoding_info = EncodingHandler.get_encoding_info(response.content, headers_dict)
+                
+                # 在记录中添加编码信息
+                record["encoding"] = encoding_info.get("encoding")
+                record["encoding_confidence"] = encoding_info.get("confidence")
+                record["encoding_source"] = encoding_info.get("source")
+                
+                # 如果编码处理后的内容与原始文本不同，使用处理后的内容
+                if decoded_text != response.text:
+                    record["body"] = decoded_text
+                    record["body_reencoded"] = True
+                else:
+                    record["body_reencoded"] = False
+                    
+            except Exception as e:
+                # 编码处理失败时，记录错误但继续使用原始文本
+                record["encoding_error"] = str(e)
+                record["encoding"] = "unknown"
+                record["encoding_confidence"] = 0.0
         
         # 保存到 Redis 成功队列
         self.redis_manager.lpush(self.success_key, json.dumps(record, ensure_ascii=False))

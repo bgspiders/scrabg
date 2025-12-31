@@ -1,22 +1,22 @@
 {
     "taskInfo": {
       "id": "7",
-      "name": "北极星",
+      "name": "测试",
       "status": "stopped",
-      "baseUrl": "https://news.bjx.com.cn/yw/",
+      "baseUrl": "https://blog.bgspider.com/",
       "updatedAt": null,
-      "concurrency": 1,
-      "description": "要闻",
+      "concurrency": 5,
+      "description": "测试逻辑",
       "crawlStartAt": null,
       "crawledCount": 0,
-      "requestInterval": 3
+      "requestInterval": 1
     },
     "workflowSteps": [
       {
         "id": 1761714896973,
         "type": "request",
         "config": {
-          "url": "https://news.bjx.com.cn/yw/",
+          "url": "https://blog.bgspider.com/",
           "method": "GET",
           "params": [],
           "headers": [],
@@ -52,6 +52,8 @@
         "id": 1761714904296,
         "type": "link_extraction",
         "config": {
+          "encoding": "",
+          "encodingMode": "auto",
           "customCodeCollapsed": "",
           "linkExtractionRules": [
             {
@@ -61,7 +63,7 @@
               "multiple": false,
               "required": false,
               "fieldName": "link",
-              "expression": "/html/body/div[5]/div/div[1]/div[2]/ul/li/a/@href",
+              "expression": "//div[@id='post-list-container']/div/a/@href",
               "linkFilter": "",
               "deduplicate": true,
               "extractType": "xpath",
@@ -76,7 +78,22 @@
               "multiple": false,
               "required": false,
               "fieldName": "title",
-              "expression": "/html/body/div[5]/div/div[1]/div[2]/ul/li/a/@title",
+              "expression": "//div[@id='post-list-container']/div/a/@aria-label",
+              "linkFilter": "",
+              "deduplicate": true,
+              "extractType": "xpath",
+              "postProcess": "",
+              "defaultValue": "",
+              "linkSelector": ""
+            },
+            {
+              "trim": true,
+              "dataType": "text",
+              "maxLinks": 10,
+              "multiple": false,
+              "required": false,
+              "fieldName": "title_other",
+              "expression": "//div[@id='post-list-container']/div/a/@aria-label",
               "linkFilter": "",
               "deduplicate": true,
               "extractType": "xpath",
@@ -99,6 +116,8 @@
         "id": 1761716321584,
         "type": "data_extraction",
         "config": {
+          "encoding": "",
+          "encodingMode": "auto",
           "extractionRules": [
             {
               "trim": true,
@@ -106,7 +125,7 @@
               "multiple": false,
               "required": false,
               "fieldName": "content",
-              "expression": "//*[@id=\"article_cont\"]",
+              "expression": "//div[contains(@class,'markdown-content')]",
               "extractType": "xpath",
               "postProcess": "",
               "defaultValue": ""
