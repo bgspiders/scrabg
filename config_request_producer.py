@@ -48,9 +48,9 @@ def build_initial_request(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main():
-    config_path = os.getenv("CONFIG_PATH", "demo.json")
+    config_path = os.getenv("CONFIG_PATH", "demo1.json")
     start_key = os.getenv("SCRAPY_START_KEY", "fetch_spider:start_urls")
-
+    print(f"[producer] 使用配置文件: {config_path}")
     config = load_config(config_path)
     payload = build_initial_request(config)
 

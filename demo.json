@@ -3,7 +3,7 @@
       "id": "7",
       "name": "测试",
       "status": "stopped",
-      "baseUrl": "https://blog.bgspider.com/",
+      "baseUrl": "https://bgspider.com/",
       "updatedAt": null,
       "concurrency": 5,
       "description": "测试逻辑",
@@ -16,7 +16,7 @@
         "id": 1761714896973,
         "type": "request",
         "config": {
-          "url": "https://blog.bgspider.com/",
+          "url": "https://bgspider.com/",
           "method": "GET",
           "params": [],
           "headers": [],
@@ -49,6 +49,40 @@
         "customCondition": ""
       },
       {
+        "id": 1761714904296,
+        "type": "link_extraction",
+        "config": {
+          "encoding": "",
+          "encodingMode": "auto",
+          "customCodeCollapsed": "",
+          "linkExtractionRules": [
+            {
+              "trim": true,
+              "dataType": "text",
+              "maxLinks": 10,
+              "multiple": false,
+              "required": false,
+              "fieldName": "link",
+              "expression": "(//div[@class=\"links-container\"]/a/@href)[1]",
+              "linkFilter": "",
+              "deduplicate": true,
+              "extractType": "xpath",
+              "postProcess": "",
+              "defaultValue": "",
+              "linkSelector": ""
+            }
+          ],
+          "nextRequestCustomCode": "",
+          "nextRequestCustomCodeError": ""
+        },
+        "testing": false,
+        "timeout": 30,
+        "condition": "always",
+        "retryCount": 0,
+        "retryDelay": 1,
+        "customCondition": ""
+      },
+            {
         "id": 1761714904296,
         "type": "link_extraction",
         "config": {
