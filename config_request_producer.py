@@ -10,6 +10,7 @@ from redis import Redis
 from crawler.utils.config_loader import load_config
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
+from utils.user_agent import random_ua
 
 load_env_file()
 
@@ -29,6 +30,10 @@ def build_initial_request(config: Dict[str, Any]) -> Dict[str, Any]:
     headers = {}
     if request_cfg.get("headersMode") == "json" and request_cfg.get("headersJson"):
         headers = json.loads(request_cfg["headersJson"])
+    
+    # 如果没有设置过 User-Agent，则添加随机 UA
+    if "User-Agent" not in headers and "user-agent" not in headers:
+        headers["User-Agent"] = random_ua()
 
     url = request_cfg.get("url") or base_url
     if not url:

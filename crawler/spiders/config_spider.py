@@ -10,6 +10,7 @@ from crawler.utils.config_loader import load_config
 from crawler.utils.workflow import WorkflowRunner
 from crawler.utils.encoding_handler import EncodingHandler
 from crawler.items import ArticleItem
+from utils.user_agent import random_ua
 
 
 class ConfigSpider(RedisSpider):
@@ -38,10 +39,15 @@ class ConfigSpider(RedisSpider):
 
     def make_request_from_data(self, data):
         payload = json.loads(data)
+        headers = payload.get("headers") or {}
+        # 如果没有设置过 User-Agent，则添加随机 UA
+        if "User-Agent" not in headers and "user-agent" not in headers:
+            headers["User-Agent"] = random_ua()
+        
         return scrapy.Request(
             url=payload["url"],
             method=payload.get("method", "GET"),
-            headers=payload.get("headers"),
+            headers=headers,
             meta=payload.get("meta") or {"workflow_index": 0},
             callback=self.handle_response,
             dont_filter=payload.get("dont_filter", False),
@@ -153,6 +159,7 @@ class ConfigSpider(RedisSpider):
                 url=absolute_url,
                 callback=self.handle_response,
                 meta={"workflow_index": next_index, **next_context},
+                headers=self._get_request_headers(),
                 dont_filter=True,
             )
             print(f"[config_spider] 链接提取 -> {absolute_url}")
@@ -192,10 +199,21 @@ class ConfigSpider(RedisSpider):
                 cfg = step.get("config", {})
                 if cfg.get("headersMode") == "json" and cfg.get("headersJson"):
                     try:
-                        return json.loads(cfg.get("headersJson"))
+                        headers = json.loads(cfg.get("headersJson"))
+                        # 如果没有设置过 User-Agent，则添加随机 UA
+                        if "User-Agent" not in headers and "user-agent" not in headers:
+                            headers["User-Agent"] = random_ua()
+                        return headers
                     except json.JSONDecodeError:
-                        return {}
-        return {}
+                        return {"User-Agent": random_ua()}
+        # 如果没有配置 headers，添加随机 UA
+        return {"User-Agent": random_ua()}
+    
+    def _get_request_headers(self):
+        """Get request headers with random UA if not already set"""
+        headers = self._parse_headers()
+        # 已经在 _parse_headers 中添加了随机 UA
+        return headers
 
     @staticmethod
     def _extract(response, expr: str, extract_type: str, multiple: bool):

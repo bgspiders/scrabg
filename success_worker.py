@@ -16,6 +16,7 @@ from crawler.utils.db_manager import DatabaseManager
 from crawler.utils.mongodb_manager import MongoDBManager
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
+from utils.user_agent import random_ua
 
 load_env_file()
 
@@ -114,10 +115,15 @@ class WorkflowProcessor:
                 value = values[idx] if idx < len(values) else values[-1]
                 next_context[field] = value
 
+            # 合并默认 headers 和自定义 headers，并添加随机 UA
+            request_headers = dict(self.default_headers)
+            if "User-Agent" not in request_headers and "user-agent" not in request_headers:
+                request_headers["User-Agent"] = random_ua()
+
             payload = {
                 "url": absolute_url,
                 "method": "GET",
-                "headers": self.default_headers,
+                "headers": request_headers,
                 "meta": {
                     "workflow_index": next_index,
                     "context": next_context,
@@ -192,10 +198,15 @@ class WorkflowProcessor:
                 cfg = step.get("config", {})
                 if cfg.get("headersMode") == "json" and cfg.get("headersJson"):
                     try:
-                        return json.loads(cfg["headersJson"])
+                        headers = json.loads(cfg["headersJson"])
+                        # 如果没有设置过 User-Agent，则添加随机 UA
+                        if "User-Agent" not in headers and "user-agent" not in headers:
+                            headers["User-Agent"] = random_ua()
+                        return headers
                     except json.JSONDecodeError:
-                        return {}
-        return {}
+                        return {"User-Agent": random_ua()}
+        # 如果没有配置 headers，添加随机 UA
+        return {"User-Agent": random_ua()}
 
     def _save_to_database(self, item: Dict[str, Any]):
         """Save extracted data to MySQL database"""

@@ -88,22 +88,35 @@ pip install -r requirements.txt
 #### 4.1 创建数据表
 
 ```sql
--- 用于保存爬取结果
-CREATE TABLE articles (
+-- 用于保存爬取结果（文章基本信息表）
+CREATE TABLE IF NOT EXISTS articles (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     task_id VARCHAR(32),
     title TEXT,
     link TEXT,
-    content LONGTEXT,
+    link_hash VARCHAR(32),
     source_url TEXT,
     extra JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_task_id (task_id),
-    INDEX idx_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    INDEX idx_created_at (created_at),
+    INDEX idx_link_hash (link_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文章基本信息表';
+
+-- 用于保存文章正文内容（内容独立存储表）
+CREATE TABLE IF NOT EXISTS article_contents (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    article_id BIGINT NOT NULL,
+    content LONGTEXT,
+    content_hash VARCHAR(64),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_article_id (article_id),
+    INDEX idx_content_hash (content_hash),
+    CONSTRAINT fk_article_contents_article_id FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='文章内容表';
 
 -- 用于存储待抓取请求（用于 fetch_spider）
-CREATE TABLE pending_requests (
+CREATE TABLE IF NOT EXISTS pending_requests (
     id BIGINT PRIMARY KEY AUTO_INCREMENT,
     url TEXT NOT NULL,
     method VARCHAR(10) DEFAULT 'GET',
@@ -112,15 +125,53 @@ CREATE TABLE pending_requests (
     meta_json TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_created_at (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='待抓取请求表';
 ```
+
+**表结构说明：**
+
+1. **articles 表（文章基本信息）**
+   - `id`: 主键，自增
+   - `task_id`: 任务 ID，关联爬虫任务
+   - `title`: 文章标题
+   - `link`: 文章链接
+   - `link_hash`: 链接的 MD5 哈希值，用于去重判断
+   - `source_url`: 来源 URL
+   - `extra`: JSON 格式的额外字段
+   - `created_at`: 创建时间
+   - **索引**：task_id、created_at、link_hash（用于快速去重查询）
+
+2. **article_contents 表（文章内容）**
+   - `id`: 主键，自增
+   - `article_id`: 关联 articles 表的外键
+   - `content`: 文章正文（LONGTEXT 类型）
+   - `content_hash`: 内容的 SHA256 哈希值，用于内容去重
+   - `created_at`: 创建时间
+   - **索引**：article_id、content_hash
+   - **外键约束**：级联删除，删除文章时自动删除内容
+
+3. **pending_requests 表（待抓取请求）**
+   - `id`: 主键，自增
+   - `url`: 待抓取的 URL
+   - `method`: HTTP 方法（GET/POST 等）
+   - `headers_json`: 请求头（JSON 格式）
+   - `params_json`: 请求参数（JSON 格式）
+   - `meta_json`: 元数据（JSON 格式）
+   - `created_at`: 创建时间
+
+**设计特点：**
+- 📊 **分表存储**：基本信息与正文内容分离，优化查询性能
+- 🔐 **去重机制**：通过 link_hash 和 content_hash 实现链接和内容去重
+- 🔗 **外键约束**：保证数据完整性，级联删除
+- 📈 **索引优化**：为常用查询字段建立索引，提升查询效率
 
 #### 4.2 插入测试数据（可选）
 
 ```sql
 -- 插入测试请求
 INSERT INTO pending_requests (url, method, headers_json, meta_json) VALUES
-('https://news.bjx.com.cn/yw/', 'GET', '{"User-Agent": "Mozilla/5.0"}', '{"test": true}');
+('https://news.bjx.com.cn/yw/', 'GET', '{"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"}', '{"test": true, "source": "test_data"}'),
+('https://www.example.com/', 'GET', '{"User-Agent": "Mozilla/5.0"}', '{"test": true}');
 ```
 
 ### 5. 启动 Redis

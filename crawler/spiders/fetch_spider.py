@@ -9,6 +9,7 @@ import scrapy
 from scrapy_redis.spiders import RedisSpider
 from crawler.utils.redis_manager import RedisManager
 from crawler.utils.encoding_handler import EncodingHandler
+from utils.user_agent import random_ua
 
 
 class FetchSpider(RedisSpider):
@@ -23,10 +24,15 @@ class FetchSpider(RedisSpider):
 
     def make_request_from_data(self, data):
         payload = json.loads(data)
+        headers = payload.get("headers") or {}
+        # 如果没有设置过 User-Agent，则添加随机 UA
+        if "User-Agent" not in headers and "user-agent" not in headers:
+            headers["User-Agent"] = random_ua()
+        
         return scrapy.Request(
             url=payload["url"],
             method=payload.get("method", "GET"),
-            headers=payload.get("headers"),
+            headers=headers,
             meta=payload.get("meta") or {},
             callback=self.parse,
             dont_filter=payload.get("dont_filter", False),

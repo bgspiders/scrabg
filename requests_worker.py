@@ -16,6 +16,7 @@ from crawler.utils.redis_manager import RedisManager
 from crawler.utils.proxy_manager import ProxyManager
 from crawler.utils.encoding_handler import EncodingHandler
 from crawler.utils.timezone_helper import TimezoneHelper
+from utils.user_agent import random_ua
 
 load_env_file()
 
@@ -82,9 +83,9 @@ class RequestsWorker:
         
         # 创建 requests Session 以复用连接
         self.session = requests.Session()
-        # 设置默认 User-Agent
+        # 设置默认随机 User-Agent
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+            "User-Agent": random_ua()
         })
         
         # 打印代理配置信息
@@ -162,8 +163,10 @@ class RequestsWorker:
         
         for attempt in range(self.max_retries):
             try:
-                # 合并 headers
+                # 合并 headers，如果没有设置过 User-Agent 则添加随机 UA
                 request_headers = {**self.session.headers, **headers}
+                if "User-Agent" not in headers and "user-agent" not in headers:
+                    request_headers["User-Agent"] = random_ua()
                 
                 # 获取代理配置
                 proxies = self.proxy_manager.get_proxies()
