@@ -232,3 +232,31 @@ class EncodingHandler:
                 info['methods'].append('chardet')
         
         return info
+
+    @staticmethod
+    def json_to_xml(data: any, root_tag: str = 'root') -> str:
+        """
+        将 JSON 数据（dict 或 list）转换为 XML 字符串
+        以便使用 XPath 进行解析
+        """
+        import html
+        import json
+        
+        def _to_xml(item):
+            if isinstance(item, dict):
+                parts = []
+                for key, value in item.items():
+                    # 确保 key 是有效的 XML 标签名
+                    tag = str(key)
+                    if not tag or (not tag[0].isalpha() and tag[0] != '_'):
+                        tag = f"n{tag}"
+                    # 替换无效字符
+                    tag = re.sub(r'[^a-zA-Z0-9_\-]', '_', tag)
+                    parts.append(f"<{tag}>{_to_xml(value)}</{tag}>")
+                return "".join(parts)
+            elif isinstance(item, list):
+                return "".join([f"<item>{_to_xml(i)}</item>" for i in item])
+            else:
+                return html.escape(str(item))
+        
+        return f"<{root_tag}>{_to_xml(data)}</{root_tag}>"

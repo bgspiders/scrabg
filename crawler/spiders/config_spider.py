@@ -225,7 +225,20 @@ class ConfigSpider(RedisSpider):
         # 如果传入的是字符串（response_text），需要创建 Selector
         if isinstance(response, str):
             from parsel import Selector
-            selector_obj = Selector(text=response)
+            
+            # 如果是 JSON，转换为 XML 以支持 XPath
+            processed_body = response
+            try:
+                # 简单判断是否可能是 JSON
+                stripped_body = response.strip()
+                if stripped_body and (stripped_body.startswith('{') or stripped_body.startswith('[')):
+                    json_data = json.loads(stripped_body)
+                    if isinstance(json_data, (dict, list)):
+                        processed_body = EncodingHandler.json_to_xml(json_data)
+            except Exception:
+                pass
+
+            selector_obj = Selector(text=processed_body)
             selector = selector_obj.xpath if extract_type == "xpath" else selector_obj.css
         else:
             selector = response.xpath if extract_type == "xpath" else response.css

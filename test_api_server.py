@@ -8,11 +8,16 @@ import os
 import sys
 import time
 import traceback
-from typing import Any, Dict, Optional
-
+import requests
+import urllib3
+from urllib.parse import urljoin
+from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
+
+# 禁用 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import uvicorn
 
 # 添加项目路径
@@ -21,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from success_worker import WorkflowProcessor
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
+from crawler.utils.encoding_handler import EncodingHandler
 
 # 加载环境变量
 load_env_file()
@@ -45,35 +51,48 @@ app.add_middleware(
 # Pydantic 模型定义
 class TaskInfo(BaseModel):
     """任务信息"""
-    id: int
-    name: str
-    baseUrl: str
+    model_config = ConfigDict(extra="allow")
+    id: Optional[Any] = None
+    name: Optional[str] = None
+    baseUrl: Optional[str] = None
 
 
 class WorkflowConfig(BaseModel):
     """工作流配置"""
-    taskInfo: TaskInfo
-    workflowSteps: list
+    model_config = ConfigDict(extra="allow")
+    taskInfo: Optional[TaskInfo] = None
+    workflowSteps: Optional[list] = None
     previous_html: Optional[str] = Field(None, description="上一步骤的响应HTML内容")
     previous_extracted_data: Optional[dict] = Field(None, description="上一步提取的数据")
     test_link_index: Optional[int] = Field(0, description="要测试的链接索引")
+    selected_record_data: Optional[dict] = Field(None, description="当前选中的记录数据（包含链接等）")
 
 
 class TestWorkflowRequest(BaseModel):
     """测试工作流请求"""
-    test_url: str = Field(..., description="测试URL")
-    config: WorkflowConfig = Field(..., description="工作流配置")
+    model_config = ConfigDict(extra="allow")
+    test_url: Optional[str] = Field(None, description="测试URL")
+    config: Optional[WorkflowConfig] = Field(None, description="工作流配置")
+    config_data: Optional[dict] = Field(None, description="兼容性配置数据")
+    workflowSteps: Optional[list] = Field(None, description="兼容性步骤列表")
+    selected_record_data: Optional[dict] = Field(None, description="当前选中的记录数据")
 
 
 class TestStepRequest(BaseModel):
     """测试单个步骤请求"""
-    test_url: str = Field(..., description="测试URL")
-    step: dict = Field(..., description="步骤配置")
+    model_config = ConfigDict(extra="allow")
+    test_url: Optional[str] = Field(None, description="测试URL")
+    step: Optional[dict] = Field(None, description="步骤配置")
+    config: Optional[dict] = Field(None, description="别名配置")
+    config_data: Optional[dict] = Field(None, description="兼容性配置数据")
+    workflowSteps: Optional[list] = Field(None, description="兼容性步骤列表")
     html_content: Optional[str] = Field(None, description="HTML内容（可选）")
+    selected_record_data: Optional[dict] = Field(None, description="当前选中的记录数据（可选）")
 
 
 class HealthResponse(BaseModel):
     """健康检查响应"""
+    model_config = ConfigDict(extra="allow")
     status: str
     service: str
     version: str
@@ -81,8 +100,9 @@ class HealthResponse(BaseModel):
 
 class ApiResponse(BaseModel):
     """通用API响应"""
+    model_config = ConfigDict(extra="allow")
     success: bool
-    data: Optional[Dict[str, Any]] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
     message: str
     execution_time: Optional[float] = None
     error_trace: Optional[str] = None
@@ -101,21 +121,46 @@ class TestWorkflowProcessor(WorkflowProcessor):
         self.redis_manager = None
         self.db_manager = None
     
-    def test_workflow(self, test_url: str, previous_html: Optional[str] = None, previous_extracted_data: Optional[dict] = None, test_link_index: int = 0) -> Dict[str, Any]:
+    def _create_selector(self, body: str) -> Any:
+        """创建 Selector，如果是 JSON 则先转为 XML"""
+        from parsel import Selector
+        processed_body = body
+        try:
+            stripped_body = body.strip()
+            if stripped_body and (stripped_body.startswith('{') or stripped_body.startswith('[')):
+                json_data = json.loads(stripped_body)
+                if isinstance(json_data, (dict, list)):
+                    processed_body = EncodingHandler.json_to_xml(json_data)
+        except Exception:
+            pass
+        return Selector(text=processed_body)
+
+    def _process_response_content(self, response: Any) -> tuple[str, dict]:
+        """使用 EncodingHandler 识别并解码响应内容"""
+        headers = dict(response.headers)
+        content = response.content
+        text = EncodingHandler.decode_content(content, headers)
+        info = EncodingHandler.get_encoding_info(content, headers)
+        return text, info
+    
+    def test_workflow(self, test_url: str, previous_html: Optional[str] = None, 
+                      previous_extracted_data: Optional[dict] = None, 
+                      test_link_index: int = 0,
+                      selected_record_data: Optional[dict] = None) -> Dict[str, Any]:
         """
-        测试完整工作流
+        测试单步工作流
         
         Args:
             test_url: 测试URL
             previous_html: 上一步骤的响应HTML内容（可选）
             previous_extracted_data: 上一步提取的数据（可选）
             test_link_index: 要测试的链接索引（默认0）
+            selected_record_data: 当前选中的记录数据（包含链接等）
             
         Returns:
             测试结果字典
         """
         import requests
-        from urllib.parse import urljoin
         
         start_time = time.time()
         results = {}
@@ -129,19 +174,72 @@ class TestWorkflowProcessor(WorkflowProcessor):
                     'execution_time': (time.time() - start_time) * 1000
                 }
             
-            # 检查第一个步骤类型
-            first_step = self.steps[0]
-            first_step_type = first_step.get('type')
+            # 只处理传入的第一个步骤（单步测试模式）
+            step = self.steps[0]
+            step_id = step.get('id', 1)
+            step_type = step.get('type')
+            step_name = step.get('name', f'Step {step_id}')
+            step_config = step.get('config', {})
             
             # 初始化响应对象
             response = None
-            response_html = None  # 用于返回给前端
+            response_html = None
             
-            # 如果提供了previous_html，使用它作为响应内容
-            if previous_html:
-                from parsel import Selector
+            # --- 步骤 1: 获取基础响应 (处理请求逻辑) ---
+            
+            # 优先处理 selected_record_data 模式
+            if selected_record_data and selected_record_data.get('link'):
+                target_url = selected_record_data['link']
+                # 确保 URL 是绝对的
+                if not target_url.startswith(('http://', 'https://')) and test_url:
+                    target_url = urljoin(test_url, target_url)
+                
+                headers = dict(self.default_headers)
+                
+                # 如果是 request 步骤且有自定义 headers，合并它们
+                if step_type == 'request' and step_config.get('headersMode') == 'json' and step_config.get('headersJson'):
+                    try:
+                        headers.update(json.loads(step_config['headersJson']))
+                    except: pass
+                
+                print(f"[TestWorkflow] 请求选中的记录链接: {target_url}")
+                resp = requests.get(target_url, headers=headers, timeout=30, verify=False)
+                if resp.status_code >= 400:
+                    return {
+                        'success': False,
+                        'error': f'请求选中的记录链接失败: HTTP {resp.status_code} ({target_url})',
+                        'url': target_url,
+                        'execution_time': (time.time() - start_time) * 1000
+                    }
+                
+                # 使用 EncodingHandler 自动识别并解码
+                response_text, encoding_info = self._process_response_content(resp)
+                
                 response = {
-                    'selector': Selector(text=previous_html),
+                    'selector': self._create_selector(response_text),
+                    'url': target_url,
+                    'body': response_text,
+                    'status_code': resp.status_code,
+                    'encoding': encoding_info.get('encoding'),
+                    'encoding_confidence': encoding_info.get('confidence'),
+                    'context': {k: v for k, v in selected_record_data.items() if k != 'link'}
+                }
+                
+                # 注入上一步提取的数据到 context (合并)
+                if previous_extracted_data:
+                    if 'link' in previous_extracted_data:
+                        response['context']['extracted_links'] = previous_extracted_data['link']
+                    for field, values in previous_extracted_data.items():
+                        if field != 'link' and field not in response['context']:
+                            response['context'][field] = values
+                            
+                response['context']['test_link_index'] = test_link_index
+                response_html = response_text
+            
+            # 模式 A: 提供了上一步的 HTML
+            elif previous_html:
+                response = {
+                    'selector': self._create_selector(previous_html),
                     'url': test_url,
                     'body': previous_html,
                     'status_code': 200,
@@ -149,207 +247,188 @@ class TestWorkflowProcessor(WorkflowProcessor):
                 }
                 response_html = previous_html
                 
-                # 如果提供了previous_extracted_data，保存到context
+                # 注入上一步提取的数据到 context
                 if previous_extracted_data:
                     if 'link' in previous_extracted_data:
                         response['context']['extracted_links'] = previous_extracted_data['link']
-                    # 保存其他提取字段
                     for field, values in previous_extracted_data.items():
                         if field != 'link':
                             response['context'][field] = values
-                # 保存要测试的链接索引
                 response['context']['test_link_index'] = test_link_index
-            # 只有第一个步骤是request类型时，才发起初始请求
-            elif first_step_type == 'request':
-                # 发起初始请求
-                response_data = requests.get(
-                    test_url, 
-                    headers=self.default_headers, 
-                    timeout=30
-                )
+            
+            # 模式 B: 没有上一步 HTML，需要发起请求
+            else:
+                # 确定请求参数 (如果是 request 步骤则使用其配置，否则使用默认)
+                method = step_config.get('method', 'GET').upper()
+                url = step_config.get('url') or test_url
+                
+                # 处理 headers
+                headers = dict(self.default_headers)
+                if step_config.get('headersMode') == 'json' and step_config.get('headersJson'):
+                    try:
+                        headers.update(json.loads(step_config['headersJson']))
+                    except: pass
+                elif step_config.get('headersMode') == 'keyvalue' and step_config.get('headers'):
+                    for h in step_config['headers']:
+                        if isinstance(h, dict) and h.get('key') and h.get('value'):
+                            headers[h['key']] = h['value']
+                
+                # 处理 params
+                params = {}
+                step_params = step_config.get('params', [])
+                if isinstance(step_params, list):
+                    for p in step_params:
+                        if isinstance(p, dict) and p.get('key') and p.get('value'):
+                            params[p['key']] = p['value']
+                
+                # 处理 body
+                body = step_config.get('body')
+                
+                # 发起请求
+                try:
+                    # 如果 body 是 JSON 字符串且方法是 POST，尝试以 JSON 形式发送
+                    if method == 'POST' and body:
+                        # 尝试多种解析方式
+                        json_body = None
+                        
+                        # 方式 1: 标准 JSON
+                        try:
+                            json_body = json.loads(body)
+                        except json.JSONDecodeError:
+                            # 方式 2: Python 字典字符串 (ast.literal_eval)
+                            try:
+                                import ast
+                                json_body = ast.literal_eval(body)
+                            except:
+                                pass
+                        
+                        if isinstance(json_body, dict):
+                            response_data = requests.post(url, headers=headers, params=params, json=json_body, timeout=30)
+                        else:
+                            response_data = requests.request(
+                                method=method, url=url, headers=headers, params=params, data=body, timeout=30
+                            )
+                    else:
+                        response_data = requests.request(
+                            method=method, url=url, headers=headers, params=params, data=body, timeout=30
+                        )
+                except Exception as req_err:
+                    return {
+                        'success': False,
+                        'error': f'请求发起失败: {str(req_err)}',
+                        'url': url,
+                        'execution_time': (time.time() - start_time) * 1000
+                    }
                 
                 if response_data.status_code >= 400:
                     return {
                         'success': False,
                         'error': f'HTTP {response_data.status_code}',
-                        'url': test_url,
+                        'url': url,
                         'status_code': response_data.status_code,
                         'execution_time': (time.time() - start_time) * 1000
                     }
                 
-                # 构建响应对象
-                from parsel import Selector
+                # 使用 EncodingHandler 自动识别并解码
+                response_text, encoding_info = self._process_response_content(response_data)
+                
                 response = {
-                    'selector': Selector(text=response_data.text),
-                    'url': test_url,
-                    'body': response_data.text,
+                    'selector': self._create_selector(response_text),
+                    'url': url,
+                    'body': response_text,
                     'status_code': response_data.status_code,
+                    'encoding': encoding_info.get('encoding'),
+                    'encoding_confidence': encoding_info.get('confidence'),
                     'context': {}
                 }
-                response_html = response_data.text  # 保存HTML用于返回
-            else:
-                # 如果第一个步骤不是request，返回提示
-                return {
-                    'success': False,
-                    'error': f'测试步骤{first_step_type}需要先测试步骤1（请求配置），请添加步骤1或从步骤1开始测试',
-                    'execution_time': (time.time() - start_time) * 1000
+                response_html = response_text
+
+            # --- 步骤 2: 处理特定步骤类型的逻辑 ---
+
+            if step_type == 'request':
+                results[f'step_{step_id}'] = {
+                    'type': step_type, 'name': step_name,
+                    'result': {
+                        'url': response['url'],
+                        'method': step_config.get('method', 'GET'),
+                        'status_code': response['status_code'],
+                        'content_length': len(response['body'])
+                    }
                 }
             
-            # 处理工作流步骤
-            index = 0
-            while index < len(self.steps):
-                step = self.steps[index]
-                step_id = step.get('id', index + 1)
-                step_type = step.get('type')
-                step_name = step.get('name', f'Step {step_id}')
-                
-                if step_type == 'request':
-                    # 记录请求步骤结果
-                    results[f'step_{step_id}'] = {
-                        'type': step_type,
-                        'name': step_name,
-                        'result': {
-                            'url': response['url'],
-                            'method': step.get('config', {}).get('method', 'GET'),
-                            'status_code': response['status_code'],
-                            'content_length': len(response['body'])
-                        }
-                    }
-                    index += 1
-                    continue
-                
-                elif step_type == 'link_extraction':
-                    # 使用 success_worker.py 的链接提取逻辑
-                    extracted = self._test_link_extraction(step, response)
-                    results[f'step_{step_id}'] = {
-                        'type': step_type,
-                        'name': step_name,
-                        'result': extracted
-                    }
+            elif step_type == 'link_extraction':
+                extracted = self._test_link_extraction(step, response)
+                results[f'step_{step_id}'] = {
+                    'type': step_type, 'name': step_name, 'result': extracted
+                }
+            
+            elif step_type == 'data_extraction':
+                # 如果是详情页提取，且我们是从列表页跳转过来的（有 extracted_links）
+                if 'extracted_links' in response.get('context', {}):
+                    links = response['context']['extracted_links']
+                    link_index = response['context'].get('test_link_index', 0)
                     
-                    # 步骤2只做链接提取，不发起请求
-                    # 将提取的链接保存到context中，供后续步骤使用
-                    if 'link' in extracted and isinstance(extracted['link'], list) and extracted['link']:
-                        response['context']['extracted_links'] = extracted['link']
-                        # 保存其他提取字段到context
-                        for field, values in extracted.items():
-                            if field != 'link' and isinstance(values, list) and values:
-                                response['context'][field] = values
-                    
-                    index += 1
-                    continue
-                
-                elif step_type == 'data_extraction':
-                    # 步骤3：如果context中没有链接，尝试从当前响应中提取
-                    if 'extracted_links' not in response.get('context', {}):
-                        # 查找前面是否有链接提取步骤
-                        for prev_step in self.steps[:index]:
-                            if prev_step.get('type') == 'link_extraction':
-                                # 重新执行链接提取
-                                link_extracted = self._test_link_extraction(prev_step, response)
-                                if 'link' in link_extracted and isinstance(link_extracted['link'], list) and link_extracted['link']:
-                                    response['context']['extracted_links'] = link_extracted['link']
-                                    # 保存其他提取字段
-                                    for field, values in link_extracted.items():
-                                        if field != 'link' and isinstance(values, list) and values:
-                                            response['context'][field] = values
-                                break
-                    
-                    # 步骤3：如果context中有链接，先请求指定的链接
-                    if 'extracted_links' in response.get('context', {}):
-                        links = response['context']['extracted_links']
-                        link_index = response['context'].get('test_link_index', 0)  # 获取要测试的链接索引
+                    if links and 0 <= link_index < len(links):
+                        target_link = links[link_index]
+                        absolute_url = urljoin(response['url'], target_link)
                         
-                        if links and 0 <= link_index < len(links):
-                            target_link = links[link_index]
-                            absolute_url = urljoin(response['url'], target_link)
+                        # 发起详情页请求
+                        detail_resp = requests.get(absolute_url, headers=self.default_headers, timeout=30)
+                        if detail_resp.status_code < 400:
+                            # 使用 EncodingHandler 自动识别并解码
+                            response_text, encoding_info = self._process_response_content(detail_resp)
                             
-                            # 发起请求获取详情页
-                            try:
-                                detail_resp = requests.get(
-                                    absolute_url,
-                                    headers=self.default_headers,
-                                    timeout=30
-                                )
-                                
-                                if detail_resp.status_code < 400:
-                                    # 更新响应对象为详情页内容
-                                    response = {
-                                        'selector': Selector(text=detail_resp.text),
-                                        'url': absolute_url,
-                                        'body': detail_resp.text,
-                                        'status_code': detail_resp.status_code,
-                                        'context': response.get('context', {})
-                                    }
-                                    response_html = detail_resp.text  # 更新response_html
-                                else:
-                                    # 请求失败，记录错误
-                                    results[f'step_{step_id}'] = {
-                                        'type': step_type,
-                                        'name': step_name,
-                                        'result': {'error': f'请求详情页失败: HTTP {detail_resp.status_code} ({absolute_url})'}
-                                    }
-                                    index += 1
-                                    continue
-                            except Exception as e:
-                                # 请求异常
-                                results[f'step_{step_id}'] = {
-                                    'type': step_type,
-                                    'name': step_name,
-                                    'result': {'error': f'请求详情页异常: {str(e)}'}
-                                }
-                                index += 1
-                                continue
-                        elif links:
-                            # 链接索引超出范围
-                            results[f'step_{step_id}'] = {
-                                'type': step_type,
-                                'name': step_name,
-                                'result': {'error': f'链接索引 {link_index} 超出范围 (0-{len(links)-1})'}
+                            response = {
+                                'selector': self._create_selector(response_text),
+                                'url': absolute_url,
+                                'body': response_text,
+                                'status_code': detail_resp.status_code,
+                                'encoding': encoding_info.get('encoding'),
+                                'encoding_confidence': encoding_info.get('confidence'),
+                                'context': response.get('context', {})
                             }
-                            index += 1
-                            continue
-                    
-                    # 使用 success_worker.py 的数据提取逻辑
-                    extracted = self._test_data_extraction(step, response)
-                    results[f'step_{step_id}'] = {
-                        'type': step_type,
-                        'name': step_name,
-                        'result': extracted
-                    }
-                    index += 1
-                    continue
+                            response_html = response_text
+                        else:
+                            return {
+                                'success': False,
+                                'error': f'请求详情页失败: HTTP {detail_resp.status_code} ({absolute_url})',
+                                'execution_time': (time.time() - start_time) * 1000
+                            }
                 
-                else:
-                    # 未知步骤类型
-                    results[f'step_{step_id}'] = {
-                        'type': step_type,
-                        'name': step_name,
-                        'result': {'warning': f'Unknown step type: {step_type}'}
-                    }
-                    index += 1
+                # 执行数据提取
+                extracted = self._test_data_extraction(step, response)
+                results[f'step_{step_id}'] = {
+                    'type': step_type, 'name': step_name, 'result': extracted
+                }
+
+            else:
+                results[f'step_{step_id}'] = {
+                    'type': step_type, 'name': step_name,
+                    'result': {'warning': f'Unsupported step type: {step_type}'}
+                }
             
             execution_time = (time.time() - start_time) * 1000
-            
             return {
                 'success': True,
-                'url': response.get('url', test_url) if response else test_url,
-                'status_code': response.get('status_code', 200) if response else 200,
-                'content_length': len(response.get('body', '')) if response else 0,
+                'url': response.get('url', test_url),
+                'status_code': response.get('status_code', 200),
+                'encoding': response.get('encoding'),
+                'encoding_confidence': response.get('encoding_confidence'),
+                'content_length': len(response.get('body', '')),
                 'steps_results': results,
                 'execution_time': execution_time,
-                'response_html': response_html  # 返回响应HTML供前端保存
+                'response_html': response_html
             }
             
         except Exception as e:
-            execution_time = (time.time() - start_time) * 1000
             import traceback
             return {
                 'success': False,
                 'error': str(e),
                 'error_trace': traceback.format_exc(),
                 'url': test_url,
-                'execution_time': execution_time
+                'status_code': 0, # 确保包含 status_code 避免后端报错
+                'execution_time': (time.time() - start_time) * 1000
             }
     
     def _test_link_extraction(self, step: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
@@ -368,6 +447,12 @@ class TestWorkflowProcessor(WorkflowProcessor):
             
             # 使用 success_worker.py 的 _extract 方法
             values = self._extract(selector, rule, multiple=True)
+            
+            # 如果是 link 字段且为文本，自动拼接绝对地址
+            if field_name == "link" and isinstance(values, list):
+                base_url = response.get('url')
+                if base_url:
+                    values = [urljoin(base_url, v) if v and isinstance(v, str) else v for v in values]
             
             # 应用 maxLinks 限制
             max_links = rule.get("maxLinks")
@@ -395,6 +480,16 @@ class TestWorkflowProcessor(WorkflowProcessor):
             # 使用 success_worker.py 的 _extract 方法
             multiple = rule.get("multiple", False)
             values = self._extract(selector, rule, multiple=multiple)
+            
+            # 如果是 link 字段且为文本，自动拼接绝对地址
+            if field_name == "link":
+                base_url = response.get('url')
+                if base_url:
+                    if isinstance(values, list):
+                        values = [urljoin(base_url, v) if v and isinstance(v, str) else v for v in values]
+                    elif isinstance(values, str) and values:
+                        values = urljoin(base_url, values)
+            
             extracted_data[field_name] = values
         
         return extracted_data
@@ -414,31 +509,47 @@ async def health_check():
 async def test_workflow(request: TestWorkflowRequest):
     """
     测试工作流配置接口
-    
-    - **test_url**: 测试URL
-    - **config**: 工作流配置，包含 taskInfo 和 workflowSteps
-    - **previous_html**: 上一步骤的响应HTML内容（可选）
-    - **previous_extracted_data**: 上一步提取的数据（可选）
-    - **test_link_index**: 要测试的链接索引（可选）
     """
     try:
-        # 转换为字典格式
-        config_dict = request.config.model_dump()
+        # 优先使用 config，其次使用 config_data，最后尝试 root 级的 workflowSteps
+        if request.config:
+            config_dict = request.config.model_dump()
+        elif request.config_data:
+            config_dict = request.config_data
+        elif request.workflowSteps:
+            config_dict = {'workflowSteps': request.workflowSteps}
+        else:
+            return ApiResponse(success=False, message='缺少配置信息 (config, config_data 或 workflowSteps)')
         
-        # 提取参数（如果有）
+        # 提取参数
+        test_url = request.test_url or config_dict.get('baseUrl') or config_dict.get('test_url')
         previous_html = config_dict.pop('previous_html', None)
         previous_extracted_data = config_dict.pop('previous_extracted_data', None)
         test_link_index = config_dict.pop('test_link_index', 0)
+        selected_record_data = request.selected_record_data or config_dict.pop('selected_record_data', None)
         
+        # 确保有 workflowSteps
+        if not config_dict.get('workflowSteps'):
+            return ApiResponse(success=False, message='配置中缺少 workflowSteps')
+            
         # 创建测试处理器
         processor = TestWorkflowProcessor(config_dict)
         
-        # 执行测试，传递所有参数
+        # 如果提供了外部 headers，更新默认 headers
+        if config_dict.get('headers'):
+            try:
+                processor.default_headers.update(config_dict['headers'])
+            except: pass
+        
+        print(f"[API] 收到测试请求: url={test_url}, has_selected_record={bool(selected_record_data)}")
+        
+        # 执行测试
         result = processor.test_workflow(
-            request.test_url, 
+            test_url, 
             previous_html=previous_html,
             previous_extracted_data=previous_extracted_data,
-            test_link_index=test_link_index
+            test_link_index=test_link_index,
+            selected_record_data=selected_record_data
         )
         
         if result.get('success'):
@@ -460,6 +571,7 @@ async def test_workflow(request: TestWorkflowRequest):
         error_trace = traceback.format_exc()
         return ApiResponse(
             success=False,
+            data={'success': False, 'error': str(e), 'status_code': 0},
             message=f'服务器错误: {str(e)}',
             error_trace=error_trace
         )
@@ -468,60 +580,116 @@ async def test_workflow(request: TestWorkflowRequest):
 @app.post('/api/test-step', response_model=ApiResponse)
 async def test_single_step(request: TestStepRequest):
     """
-    测试单个步骤接口
-    
-    - **test_url**: 测试URL
-    - **step**: 步骤配置
-    - **html_content**: HTML内容（可选，如果提供则不发起请求）
+    测试单个步骤接口 (兼容多种配置格式)
     """
     try:
-        # 构建最小配置
-        config = {
-            'taskInfo': {'id': 1, 'name': 'Test'},
-            'workflowSteps': [request.step]
+        # 获取原始字典以便全量搜索
+        raw_payload = request.model_dump()
+        print(raw_payload)
+        if request.model_extra:
+            raw_payload.update(request.model_extra)
+            
+        # 更加鲁棒的步骤提取逻辑
+        step = request.step
+        config_data = request.config_data or request.config or {}
+        workflow_steps = request.workflowSteps
+        
+        # 1. 如果有 workflowSteps，取第一个作为当前步骤
+        if not step:
+            if workflow_steps:
+                step = workflow_steps[0]
+            elif isinstance(config_data, dict) and config_data.get('workflowSteps'):
+                step = config_data['workflowSteps'][0]
+            elif isinstance(config_data, dict) and config_data.get('step'):
+                step = config_data['step']
+        
+        if not step:
+            return ApiResponse(
+                success=False, 
+                message='缺少步骤配置 (请检查 payload 结构)',
+                data={
+                    'debug': {
+                        'received_keys': list(raw_payload.keys()),
+                        'has_config_data': bool(request.config_data),
+                        'has_config': bool(request.config),
+                        'has_workflow_steps': bool(request.workflowSteps),
+                        'has_step': bool(request.step)
+                    }
+                }
+            )
+            
+        # 确定测试 URL
+        test_url = request.test_url
+        if not test_url and isinstance(config_data, dict):
+            test_url = config_data.get('test_url') or config_data.get('baseUrl')
+            
+        # 构建执行配置
+        final_config = {
+            'taskInfo': (config_data.get('taskInfo') if isinstance(config_data, dict) else None) or {'id': 1, 'name': 'Test', 'baseUrl': test_url},
+            'workflowSteps': [step]
         }
         
-        processor = TestWorkflowProcessor(config)
+        processor = TestWorkflowProcessor(final_config)
         
-        # 如果提供了html_content，直接使用；否则发起请求
-        if request.html_content:
-            from parsel import Selector
-            response = {
-                'selector': Selector(text=request.html_content),
-                'url': request.test_url,
-                'body': request.html_content,
-                'context': {}
-            }
-        else:
-            import requests as req
-            resp = req.get(request.test_url, headers=processor.default_headers, timeout=30)
-            from parsel import Selector
-            response = {
-                'selector': Selector(text=resp.text),
-                'url': request.test_url,
-                'body': resp.text,
-                'context': {}
-            }
+        # 处理全局 headers
+        global_headers = {}
+        if isinstance(config_data, dict) and config_data.get('headers'):
+            global_headers = config_data['headers']
+        elif raw_payload.get('headers'):
+            global_headers = raw_payload['headers']
+            
+        if global_headers:
+            try:
+                processor.default_headers.update(global_headers)
+            except: pass
+            
+        # 确定中间数据源
+        previous_html = request.html_content
+        previous_data = None
         
-        # 根据步骤类型执行测试
-        step_type = request.step.get('type')
-        if step_type == 'link_extraction':
-            result = processor._test_link_extraction(request.step, response)
-        elif step_type == 'data_extraction':
-            result = processor._test_data_extraction(request.step, response)
-        else:
-            result = {'warning': f'Unsupported step type: {step_type}'}
+        if isinstance(config_data, dict):
+            previous_html = config_data.get('previous_html') or previous_html
+            previous_data = config_data.get('previous_extracted_data')
+            
+        test_link_index = raw_payload.get('test_link_index', 0)
+        if isinstance(config_data, dict) and 'test_link_index' in config_data:
+            test_link_index = config_data['test_link_index']
+            
+        selected_record_data = request.selected_record_data
+        if not selected_record_data and isinstance(config_data, dict):
+            selected_record_data = config_data.get('selected_record_data')
         
-        return ApiResponse(
-            success=True,
-            data=result,
-            message='步骤测试成功'
+        print(f"[API] 收到单步测试请求: url={test_url}, has_selected_record={bool(selected_record_data)}")
+        
+        # 执行测试
+        result = processor.test_workflow(
+            test_url or final_config['taskInfo'].get('baseUrl'), 
+            previous_html=previous_html,
+            previous_extracted_data=previous_data,
+            test_link_index=test_link_index,
+            selected_record_data=selected_record_data
         )
+        
+        if result.get('success'):
+            return ApiResponse(
+                success=True,
+                data=result,
+                message='步骤测试成功',
+                execution_time=result.get('execution_time', 0)
+            )
+        else:
+            return ApiResponse(
+                success=False,
+                data=result,
+                message=result.get('error', '步骤测试失败'),
+                execution_time=result.get('execution_time', 0)
+            )
     
     except Exception as e:
         error_trace = traceback.format_exc()
         return ApiResponse(
             success=False,
+            data={'success': False, 'error': str(e), 'status_code': 0},
             message=f'测试失败: {str(e)}',
             error_trace=error_trace
         )

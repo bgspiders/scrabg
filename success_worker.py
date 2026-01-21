@@ -16,6 +16,7 @@ from crawler.utils.db_manager import DatabaseManager
 from crawler.utils.mongodb_manager import MongoDBManager
 from crawler.utils.env_loader import load_env_file
 from crawler.utils.redis_manager import RedisManager
+from crawler.utils.encoding_handler import EncodingHandler
 from utils.user_agent import random_ua
 
 load_env_file()
@@ -58,11 +59,24 @@ class WorkflowProcessor:
         workflow_index = meta.get("workflow_index", 0)
         context = meta.get("context") or {}
 
-        selector = Selector(text=record.get("body", ""))
+        body = record.get("body", "")
+        
+        # 如果是 JSON，转换为 XML 以支持 XPath
+        try:
+            # 简单判断是否可能是 JSON
+            stripped_body = body.strip()
+            if stripped_body and (stripped_body.startswith('{') or stripped_body.startswith('[')):
+                json_data = json.loads(stripped_body)
+                if isinstance(json_data, (dict, list)):
+                    body = EncodingHandler.json_to_xml(json_data)
+        except Exception:
+            pass
+
+        selector = Selector(text=body)
         response = {
             "selector": selector,
             "url": record.get("url"),
-            "body": record.get("body", ""),
+            "body": record.get("body", ""),  # 原始 body 保留在 response 中
             "context": context,
         }
 
